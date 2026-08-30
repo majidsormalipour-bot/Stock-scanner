@@ -28,6 +28,7 @@
 import argparse
 import time
 import warnings
+import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -47,8 +48,9 @@ WEIGHT_TECHNICAL = 0.20        # روند قیمت (آیا در مسیر صعو�
 WEIGHT_ANALYST = 0.20          # نظر تحلیل‌گران حرفه‌ای بازار
 
 HISTORY_PERIOD = "1y"
-MAX_WORKERS = 12
-REQUEST_TIMEOUT_RETRIES = 2
+MAX_WORKERS = int(os.environ.get("SCANNER_MAX_WORKERS", "12"))
+BATCH_DELAY_SECONDS = float(os.environ.get("SCANNER_BATCH_DELAY", "0"))
+REQUEST_TIMEOUT_RETRIES = 3
 MAX_PER_SECTOR = 3              # حداکثر چند سهم از یک صنعت در لیست نهایی
 
 DISPLAY_CURRENCY = "EUR"    # واحد پول نمایشی گزارش. "USD" یا "EUR"
@@ -211,19 +213,28 @@ def fetch_one(ticker: str) -> dict:
             if attempt == REQUEST_TIMEOUT_RETRIES:
                 row["error"] = str(e)
                 return row
-            time.sleep(1)
+            wait = 8 * (attempt + 1) if "429" in str(e) else 1.5 * (attempt + 1)
+            time.sleep(wait)
     return row
 
 
-def fetch_universe_data(tickers: list[str], max_workers: int = MAX_WORKERS) -> pd.DataFrame:
-    records, done, total = [], 0, len(tickers)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(fetch_one, t): t for t in tickers}
-        for future in as_completed(futures):
-            done += 1
-            records.append(future.result())
-            if done % 25 == 0 or done == total:
-                print(f"  Progress: {done}/{total} tickers processed...")
+def fetch_universe_data(tickers: list[str], max_workers: int = MAX_WORKERS,
+                         batch_delay: float = BATCH_DELAY_SECONDS) -> pd.DataFrame:
+    """داده هر نماد را می‌گیرد. برای جلوگیری از مسدودشدن توسط یاهو (که در
+    سرورهای ابری خیلی حساس‌تر است)، درخواست‌ها را در دسته‌های کوچک با
+    مکث بین هر دسته پردازش می‌کند، نه همه را همزمان."""
+    records, total = [], len(tickers)
+    for start in range(0, total, max_workers):
+        batch = tickers[start:start + max_workers]
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(fetch_one, t): t for t in batch}
+            for future in as_completed(futures):
+                records.append(future.result())
+        done = min(start + max_workers, total)
+        if done % 25 < max_workers or done == total:
+            print(f"  Progress: {done}/{total} tickers processed...")
+        if batch_delay and done < total:
+            time.sleep(batch_delay)
     return pd.DataFrame(records).set_index("ticker")
 
 
@@ -235,6 +246,13 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
                            min_data_fields: int = 7) -> pd.DataFrame:
     before = len(df)
     if "error" in df.columns:
+        error_count = df["error"].notna().sum()
+        if error_count:
+            print(f"  Note: {error_count} of {before} tickers had a fetch error "
+                  f"(often Yahoo Finance rate-limiting on cloud IPs).")
+            sample = df.loc[df["error"].notna(), "error"].dropna().iloc[:1]
+            if not sample.empty:
+                print(f"  Sample error: {sample.iloc[0]}")
         df = df[df["error"].isna()]
 
     if "market_cap" in df.columns and min_market_cap:
