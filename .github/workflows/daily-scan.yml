@@ -1,0 +1,55 @@
+name: Daily Stock Scan
+
+on:
+  schedule:
+    # هر روز ساعت ۲۲:۰۰ UTC (حدود نیم ساعت بعد از بسته‌شدن بازار آمریکا) - روزهای کاری
+    - cron: "0 22 * * 1-5"
+  workflow_dispatch: {}   # امکان اجرای دستی از تب Actions در گیت‌هاب
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  scan-and-publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run long-term scanner
+        run: python market_scanner.py --top 15
+        continue-on-error: true
+
+      - name: Run short-term scanner
+        run: python short_term_scanner.py --top 15
+        continue-on-error: true
+
+      - name: Assemble site folder
+        run: |
+          mkdir -p site
+          cp market_scan_report.html site/ 2>/dev/null || true
+          cp short_term_scan_report.html site/ 2>/dev/null || true
+          python generate_index.py
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
