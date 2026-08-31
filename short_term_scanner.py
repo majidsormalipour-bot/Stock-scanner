@@ -320,14 +320,15 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
 # ----------------------------------------------------------------------
 
 def normalize(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
+    """رتبه‌بندی صدکی (نه min-max) - مقاوم‌تر به داده پرت. جزئیات دلیل در
+    نسخه بلندمدت (market_scanner.py) توضیح داده شده."""
     s = series.astype(float)
     if s.dropna().empty:
         return pd.Series([0.5] * len(s), index=s.index)
-    mn, mx = s.min(), s.max()
-    if mn == mx:
-        return pd.Series([0.5] * len(s), index=s.index)
-    norm = (s - mn) / (mx - mn)
-    return norm if higher_is_better else 1 - norm
+    ranks = s.rank(pct=True, na_option="keep")
+    if not higher_is_better:
+        ranks = 1 - ranks
+    return ranks
 
 
 def score_momentum(df: pd.DataFrame) -> pd.Series:
