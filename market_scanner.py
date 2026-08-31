@@ -244,7 +244,7 @@ def fetch_universe_data(tickers: list[str], max_workers: int = MAX_WORKERS,
 # ----------------------------------------------------------------------
 
 def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_eur: float = None,
-                           min_data_fields: int = 7) -> pd.DataFrame:
+                           min_data_fields: int = 5) -> pd.DataFrame:
     before = len(df)
     if "error" in df.columns:
         error_count = df["error"].notna().sum()
@@ -278,7 +278,7 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
         safe_leverage = df["debt_to_equity"].isna() | (df["debt_to_equity"] < 300)
         df = df[is_exempt | safe_leverage]
 
-    key_fields = [c for c in ["pe_ratio", "revenue_growth", "profit_margin",
+    key_fields = [c for c in ["pe_ratio", "ev_to_ebitda", "revenue_growth", "profit_margin",
                                "momentum_3m", "roe", "target_mean_price"] if c in df.columns]
     df = df[df[key_fields].notna().sum(axis=1) >= min_data_fields]
 
