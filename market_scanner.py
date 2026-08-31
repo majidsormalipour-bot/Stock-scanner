@@ -42,10 +42,10 @@ warnings.filterwarnings("ignore")
 # ----------------------------------------------------------------------
 
 # وزن هر بُعد در امتیاز نهایی (جمعاً = ۱)
-WEIGHT_GROWTH_VALUE = 0.35     # رشد و ارزندگی (آیا سهم نسبت به رشدش ارزان است؟)
-WEIGHT_QUALITY = 0.25          # سلامت مالی (بدهی، سودآوری، جریان نقدی)
-WEIGHT_TECHNICAL = 0.20        # روند قیمت (آیا در مسیر صعودی است؟)
-WEIGHT_ANALYST = 0.20          # نظر تحلیل‌گران حرفه‌ای بازار
+WEIGHT_GROWTH_VALUE = 0.35     # رشد و ارزندگی (P/E، EV/EBITDA، PEG، FCF yield نسبت به هم‌صنعتی‌ها)
+WEIGHT_QUALITY = 0.30           # سلامت مالی نسبت به هم‌صنعتی‌ها (بدهی، سودآوری، جریان نقدی)
+WEIGHT_TECHNICAL = 0.20         # روند قیمت + مومنتوم ۱۲-۱ ماهه (فاکتور آکادمیک)
+WEIGHT_ANALYST = 0.15           # نظر تحلیل‌گران - وزن محدودتر چون این معیار سابقه سوگیری خوش‌بینانه دارد
 
 HISTORY_PERIOD = "1y"
 MAX_WORKERS = int(os.environ.get("SCANNER_MAX_WORKERS", "12"))
@@ -148,14 +148,6 @@ UNIVERSE_LOADERS = {
 # ۲) دریافت داده هر سهم
 # ----------------------------------------------------------------------
 
-def compute_rsi(series: pd.Series, period: int = 14) -> float:
-    delta = series.diff()
-    gain, loss = delta.clip(lower=0), -delta.clip(upper=0)
-    rs = gain.rolling(period).mean() / loss.rolling(period).mean().replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1]) if not rsi.empty else np.nan
-
-
 def fetch_one(ticker: str) -> dict:
     row = {"ticker": ticker}
     for attempt in range(REQUEST_TIMEOUT_RETRIES + 1):
@@ -171,6 +163,7 @@ def fetch_one(ticker: str) -> dict:
                 "market_cap": info.get("marketCap"),
                 "pe_ratio": info.get("trailingPE"),
                 "peg_ratio": info.get("pegRatio"),
+                "ev_to_ebitda": info.get("enterpriseToEbitda"),  # نسبت‌ ارزندگی مستقل از ساختار سرمایه - بهتر از P/E برای مقایسه بین شرکت‌ها
                 "profit_margin": info.get("profitMargins"),
                 "revenue_growth": info.get("revenueGrowth"),
                 "earnings_growth": info.get("earningsGrowth"),
@@ -184,6 +177,8 @@ def fetch_one(ticker: str) -> dict:
                 "num_analysts": info.get("numberOfAnalystOpinions"),
                 "recommendation": info.get("recommendationKey"),
             })
+            if row.get("free_cashflow") and row.get("market_cap"):
+                row["fcf_yield"] = row["free_cashflow"] / row["market_cap"]  # جریان نقدی آزاد نسبت به ارزش بازار - معیار ارزندگی مورد علاقه سرمایه‌گذاران ارزشی
 
             hist = tk.history(period=HISTORY_PERIOD)
             if not hist.empty:
@@ -191,7 +186,13 @@ def fetch_one(ticker: str) -> dict:
                 sma50 = close.rolling(50).mean().iloc[-1]
                 sma200 = close.rolling(200).mean().iloc[-1] if len(close) >= 200 else np.nan
                 price = close.iloc[-1]
+                # مومنتوم ۱۲-۱ ماهه: یک فاکتور شناخته‌شده در ادبیات مالی
+                # (Jegadeesh & Titman) - بازده ۱۲ ماه اخیر بدون آخرین ماه،
+                # چون ماه آخر معمولاً بازگشت کوتاه‌مدت (mean-reversion) نشان می‌دهد
                 momentum_3m = (close.iloc[-1] / close.iloc[-63] - 1) if len(close) >= 63 else np.nan
+                momentum_12_1 = (
+                    (close.iloc[-22] / close.iloc[-252] - 1) if len(close) >= 252 else np.nan
+                )
                 volatility = close.pct_change().std() * np.sqrt(252)
 
                 row.update({
@@ -201,8 +202,8 @@ def fetch_one(ticker: str) -> dict:
                     "above_sma200": bool(price > sma200) if pd.notna(sma200) else None,
                     "golden_cross": bool(sma50 > sma200) if pd.notna(sma50) and pd.notna(sma200) else None,
                     "momentum_3m": momentum_3m,
+                    "momentum_12_1": momentum_12_1,
                     "volatility_annualized": volatility,
-                    "rsi": compute_rsi(close),
                 })
 
                 if row.get("target_mean_price") and price:
@@ -266,11 +267,18 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
             market_cap_usd.loc[is_eur] = df.loc[is_eur, "market_cap"] / fx_rate_usd_eur
         df = df[market_cap_usd.fillna(0) >= min_market_cap]
 
-    # حذف شرکت‌هایی با بدهی افراطی نسبت به سرمایه (ریسک بالای ورشکستگی)
-    if "debt_to_equity" in df.columns:
-        df = df[df["debt_to_equity"].isna() | (df["debt_to_equity"] < 300)]
+    # حذف شرکت‌هایی با بدهی افراطی - اما نه بانک‌ها/بیمه‌ها که ذاتاً
+    # به‌خاطر ماهیت کسب‌وکار (سپرده مشتریان = بدهی در ترازنامه) بدهی/سرمایه
+    # بسیار بالایی دارند؛ این طبیعی است و نشانه ریسک نیست. اعمال یک آستانه
+    # واحد روی همه صنایع، عملاً کل بخش مالی را حذف می‌کند - این یک خطای
+    # روش‌شناسی رایج در غربالگری‌های ساده است.
+    if "debt_to_equity" in df.columns and "sector" in df.columns:
+        leverage_exempt_sectors = {"Financial Services", "Financials", "Utilities"}
+        is_exempt = df["sector"].isin(leverage_exempt_sectors)
+        safe_leverage = df["debt_to_equity"].isna() | (df["debt_to_equity"] < 300)
+        df = df[is_exempt | safe_leverage]
 
-    key_fields = [c for c in ["pe_ratio", "revenue_growth", "profit_margin", "rsi",
+    key_fields = [c for c in ["pe_ratio", "revenue_growth", "profit_margin",
                                "momentum_3m", "roe", "target_mean_price"] if c in df.columns]
     df = df[df[key_fields].notna().sum(axis=1) >= min_data_fields]
 
@@ -283,14 +291,19 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
 # ----------------------------------------------------------------------
 
 def normalize(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
+    """رتبه‌بندی صدکی (۰ تا ۱) به‌جای min-max ساده. دلیل: min-max به‌شدت
+    نسبت به داده پرت حساس است - یک شرکت با رشد سود ۹۰۰٪ (مثلاً بازگشت از
+    ضرر یک‌باره) کل مقیاس را کشیده و بقیه سهام را مصنوعاً فشرده نشان
+    می‌دهد. رتبه‌بندی صدکی (percentile rank) استاندارد رایج در ساخت
+    فاکتورهای کمّی (مثلاً چارچوب‌های AQR و MSCI Factor) است چون به داده‌های
+    پرت حساس نیست."""
     s = series.astype(float)
     if s.dropna().empty:
         return pd.Series([0.5] * len(s), index=s.index)
-    mn, mx = s.min(), s.max()
-    if mn == mx:
-        return pd.Series([0.5] * len(s), index=s.index)
-    norm = (s - mn) / (mx - mn)
-    return norm if higher_is_better else 1 - norm
+    ranks = s.rank(pct=True, na_option="keep")
+    if not higher_is_better:
+        ranks = 1 - ranks
+    return ranks
 
 
 def sector_relative_normalize(df: pd.DataFrame, col: str, higher_is_better: bool = True) -> pd.Series:
@@ -307,8 +320,18 @@ def score_growth_value(df: pd.DataFrame) -> pd.Series:
     if "pe_ratio" in df.columns:
         score += sector_relative_normalize(df, "pe_ratio", higher_is_better=False).fillna(0.5)
         n += 1
+    if "ev_to_ebitda" in df.columns:
+        # مستقل از ساختار سرمایه (بدهی) است؛ برای مقایسه بین شرکت‌ها از P/E
+        # قابل‌اعتمادتر است چون تفاوت در میزان بدهی/مالیات را خنثی می‌کند
+        score += sector_relative_normalize(df, "ev_to_ebitda", higher_is_better=False).fillna(0.5)
+        n += 1
     if "peg_ratio" in df.columns:
         score += sector_relative_normalize(df, "peg_ratio", higher_is_better=False).fillna(0.5)
+        n += 1
+    if "fcf_yield" in df.columns:
+        # جریان نقدی آزاد نسبت به ارزش بازار - معیار محبوب سرمایه‌گذاران
+        # ارزشی (مشابه مفهوم "owner earnings" وارن بافت)
+        score += normalize(df["fcf_yield"], True).fillna(0.5)
         n += 1
     if "revenue_growth" in df.columns:
         score += normalize(df["revenue_growth"], True).fillna(0.5)
@@ -320,23 +343,32 @@ def score_growth_value(df: pd.DataFrame) -> pd.Series:
 
 
 def score_quality(df: pd.DataFrame) -> pd.Series:
+    """توجه: این معیارها را نسبت به هم‌صنعتی‌ها می‌سنجیم، نه کل بازار.
+    حاشیه سود نرم‌افزار ذاتاً بالاتر از خرده‌فروشی است؛ این تفاوت صنعتی
+    است، نه برتری واقعی یک شرکت بر دیگری."""
     score, n = pd.Series(0.0, index=df.index), 0
     if "profit_margin" in df.columns:
-        score += normalize(df["profit_margin"], True).fillna(0.5); n += 1
+        score += sector_relative_normalize(df, "profit_margin", True).fillna(0.5); n += 1
     if "roe" in df.columns:
-        score += normalize(df["roe"], True).fillna(0.5); n += 1
+        score += sector_relative_normalize(df, "roe", True).fillna(0.5); n += 1
     if "debt_to_equity" in df.columns:
-        score += normalize(df["debt_to_equity"], False).fillna(0.5); n += 1
+        score += sector_relative_normalize(df, "debt_to_equity", False).fillna(0.5); n += 1
     if "current_ratio" in df.columns:
-        score += normalize(df["current_ratio"], True).fillna(0.5); n += 1
+        score += sector_relative_normalize(df, "current_ratio", True).fillna(0.5); n += 1
     if "free_cashflow" in df.columns:
         score += (df["free_cashflow"].fillna(0) > 0).astype(float); n += 1
     return score / n if n else score
 
 
 def score_technical(df: pd.DataFrame) -> pd.Series:
+    """توجه روش‌شناسی: RSI (اندیکاتور نوسان‌گیری کوتاه‌مدت) عمداً از این
+    امتیاز بلندمدت حذف شده. به‌جایش از مومنتوم ۱۲-۱ ماهه استفاده می‌شود -
+    یک فاکتور شناخته‌شده در ادبیات مالی آکادمیک (Jegadeesh & Titman, 1993)
+    که برای افق سرمایه‌گذاری چندماهه مناسب‌تر است."""
     score, n = pd.Series(0.0, index=df.index), 0
-    if "momentum_3m" in df.columns:
+    if "momentum_12_1" in df.columns:
+        score += normalize(df["momentum_12_1"], True).fillna(0.5); n += 1
+    elif "momentum_3m" in df.columns:
         score += normalize(df["momentum_3m"], True).fillna(0.5); n += 1
     if "above_sma50" in df.columns:
         score += df["above_sma50"].map({True: 1.0, False: 0.0}).fillna(0.5); n += 1
@@ -344,20 +376,18 @@ def score_technical(df: pd.DataFrame) -> pd.Series:
         score += df["above_sma200"].map({True: 1.0, False: 0.0}).fillna(0.5); n += 1
     if "golden_cross" in df.columns:
         score += df["golden_cross"].map({True: 1.0, False: 0.0}).fillna(0.5); n += 1
-    if "rsi" in df.columns:
-        def rsi_score(r):
-            if pd.isna(r): return 0.5
-            if r < 30: return 0.9
-            if r > 70: return 0.2
-            return 0.6
-        score += df["rsi"].map(rsi_score); n += 1
-    # جریمه برای نوسان افراطی (ریسک بالا)
+    # نوسان‌پذیری با وزن کمتر لحاظ می‌شود: نوسان بالا لزوماً بد نیست (خیلی
+    # از سهام رشدی خوب نوسان بالایی دارند)؛ این فقط یک گرایش محافظه‌کارانه
+    # خفیف است، نه جریمه سنگین.
     if "volatility_annualized" in df.columns:
-        score += normalize(df["volatility_annualized"], False).fillna(0.5); n += 1
+        score += 0.5 * normalize(df["volatility_annualized"], False).fillna(0.5) + 0.25; n += 0.75
     return score / n if n else score
 
 
 def score_analyst(df: pd.DataFrame) -> pd.Series:
+    """توجه: قیمت هدف تحلیل‌گران در ادبیات مالی سابقه سوگیری خوش‌بینانه و
+    واکنشی (نه پیش‌بینانه) دارد؛ به همین دلیل وزن این بخش در امتیاز کل
+    نسبتاً محدود نگه داشته شده و نباید تنها معیار تصمیم‌گیری باشد."""
     score, n = pd.Series(0.0, index=df.index), 0
     if "analyst_upside" in df.columns:
         score += normalize(df["analyst_upside"], True).fillna(0.5); n += 1
@@ -376,12 +406,14 @@ def explain_pick(row: pd.Series) -> str:
         reasons.append("سودآوری بالا")
     if pd.notna(row.get("debt_to_equity")) and row["debt_to_equity"] < 50:
         reasons.append("بدهی کم")
+    if pd.notna(row.get("fcf_yield")) and row["fcf_yield"] > 0.05:
+        reasons.append("جریان نقدی آزاد قوی نسبت به ارزش بازار")
     if row.get("above_sma200"):
         reasons.append("روند قیمتی صعودی بلندمدت")
+    if pd.notna(row.get("momentum_12_1")) and row["momentum_12_1"] > 0.15:
+        reasons.append(f"بازده {row['momentum_12_1']*100:.0f}٪ در ۱۲ ماه اخیر")
     if pd.notna(row.get("analyst_upside")) and row["analyst_upside"] > 0.10:
         reasons.append(f"تحلیل‌گران حدود {row['analyst_upside']*100:.0f}٪ رشد بیشتر پیش‌بینی کرده‌اند")
-    if pd.notna(row.get("rsi")) and row["rsi"] < 35:
-        reasons.append("اخیراً افت قیمت داشته (احتمال فرصت ورود ارزان‌تر)")
     return "، ".join(reasons) if reasons else "امتیاز متعادل در چند معیار مختلف"
 
 
