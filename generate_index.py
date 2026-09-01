@@ -42,6 +42,12 @@ html = f"""<!DOCTYPE html>
     <div class="desc">مومنتوم، حجم معاملات، MACD و حد ضرر پیشنهادی</div>
   </a>
 
+  <a class="card" href="reversal_scan_report.html">
+    <span class="emoji">🔄</span>
+    <div class="title">بازگشت از حمایت</div>
+    <div class="desc">سهام افتاده ولی ارزنده، نزدیک سطح حمایت فنی</div>
+  </a>
+
   <p style="color:#666;font-size:11px;margin-top:24px;">
     این گزارش‌ها هر روز خودکار به‌روزرسانی می‌شوند و صرفاً بر پایه فرمول‌های
     عددی هستند، نه توصیه مالی.
