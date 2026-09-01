@@ -2,8 +2,9 @@ name: Daily Stock Scan
 
 on:
   schedule:
+    # هر روز ساعت ۲۲:۰۰ UTC (حدود نیم ساعت بعد از بسته‌شدن بازار آمریکا) - روزهای کاری
     - cron: "0 22 * * 1-5"
-  workflow_dispatch: {}
+  workflow_dispatch: {}   # امکان اجرای دستی از تب Actions در گیت‌هاب
 
 permissions:
   contents: read
@@ -34,7 +35,7 @@ jobs:
           SCANNER_MAX_WORKERS: "2"
           SCANNER_BATCH_DELAY: "1.5"
         run: python market_scanner.py --top 15
-        continue-on-error: true
+        continue-on-error: true   # اگر یکی خطا داد، دیگری هم اجرا شود
 
       - name: Run short-term scanner
         env:
@@ -43,11 +44,19 @@ jobs:
         run: python short_term_scanner.py --top 15
         continue-on-error: true
 
+      - name: Run reversal (value at support) scanner
+        env:
+          SCANNER_MAX_WORKERS: "2"
+          SCANNER_BATCH_DELAY: "1.5"
+        run: python reversal_scanner.py --top 15
+        continue-on-error: true
+
       - name: Assemble site folder
         run: |
           mkdir -p site
           cp market_scan_report.html site/ 2>/dev/null || true
           cp short_term_scan_report.html site/ 2>/dev/null || true
+          cp reversal_scan_report.html site/ 2>/dev/null || true
           python generate_index.py
 
       - name: Upload Pages artifact
