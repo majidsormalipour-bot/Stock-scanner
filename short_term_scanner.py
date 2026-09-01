@@ -47,10 +47,13 @@ warnings.filterwarnings("ignore")
 # تنظیمات
 # ----------------------------------------------------------------------
 
-WEIGHT_MOMENTUM = 0.30      # مومنتوم اخیر قیمت (۵ و ۲۰ روزه)
+WEIGHT_MOMENTUM = 0.25      # قدرت نسبی به بازار (نه مومنتوم خام) - ۵ و ۲۰ روزه
 WEIGHT_VOLUME = 0.15        # افزایش غیرعادی حجم معاملات (نشانه توجه بازار)
-WEIGHT_MACD = 0.25          # تقاطع صعودی MACD
-WEIGHT_BREAKOUT = 0.30      # نزدیکی به سقف/شکست سطح مقاومت
+WEIGHT_MACD = 0.20          # تقاطع صعودی MACD
+WEIGHT_BREAKOUT = 0.25      # نزدیکی به سقف/شکست سطح مقاومت
+WEIGHT_TREND = 0.15         # هم‌جهتی با روند بلندمدت (فیلتر "چاقوی در حال سقوط")
+BENCHMARK_TICKER = "SPY"    # برای سنجش قدرت نسبی سهم به کل بازار
+MIN_DOLLAR_VOLUME = 5_000_000   # حداقل میانگین حجم معاملات روزانه (به دلار) برای نقدشوندگی کافی
 
 HISTORY_PERIOD = "6mo"
 # روی سرورهای ابری (مثل GitHub Actions) یاهو فایننس درخواست‌های پرحجم و
@@ -225,12 +228,24 @@ def fetch_one(ticker: str) -> dict:
             atr = compute_atr(hist)
             suggested_stop = price - ATR_STOP_MULTIPLIER * atr if pd.notna(atr) else np.nan
 
+            # روند بلندمدت‌تر: آیا سهم در جهت روند صعودی اصلی است؟ معامله
+            # در خلاف جهت روند اصلی ("گرفتن چاقوی در حال سقوط") ریسک بالاتری
+            # دارد، حتی اگر سیگنال کوتاه‌مدت مثبت باشد.
+            sma50 = close.rolling(50).mean().iloc[-1] if len(close) >= 50 else np.nan
+            above_sma50 = bool(price > sma50) if pd.notna(sma50) else None
+
+            # نقدشوندگی واقعی: ارزش بازار بالا کافی نیست اگر حجم معاملات
+            # روزانه کم باشد - ورود/خروج بدون تأثیر روی قیمت سخت می‌شود
+            avg_dollar_volume = float((close * volume).rolling(20).mean().iloc[-1])
+
             row.update({
                 "current_price": price,
                 "price_date": hist.index[-1].strftime("%Y-%m-%d"),
                 "mom_5d": mom_5d,
                 "mom_20d": mom_20d,
                 "volume_ratio": vol_ratio,
+                "avg_dollar_volume": avg_dollar_volume,
+                "above_sma50": above_sma50,
                 "macd_bullish_cross": macd_bullish_cross,
                 "macd_positive": macd_positive,
                 "pct_from_20d_high": pct_from_high,
@@ -259,6 +274,22 @@ def fetch_one(ticker: str) -> dict:
             wait = 8 * (attempt + 1) if "429" in str(e) else 1.5 * (attempt + 1)
             time.sleep(wait)
     return row
+
+
+def get_benchmark_returns() -> dict:
+    """بازدهی ۵ و ۲۰ روزه شاخص S&P 500 را می‌گیرد تا مومنتوم هر سهم را با
+    بازار مقایسه کنیم، نه به‌صورت مطلق. سهمی که ۳٪ رشد کرده وقتی کل بازار
+    هم ۳٪ رشد کرده، در واقع قدرت نسبی نشان نمی‌دهد - فقط با بازار حرکت کرده."""
+    try:
+        hist = yf.Ticker(BENCHMARK_TICKER).history(period=HISTORY_PERIOD)
+        close = hist["Close"]
+        return {
+            "mom_5d": (close.iloc[-1] / close.iloc[-6] - 1) if len(close) >= 6 else 0.0,
+            "mom_20d": (close.iloc[-1] / close.iloc[-21] - 1) if len(close) >= 21 else 0.0,
+        }
+    except Exception:
+        print("  Could not fetch benchmark (SPY) data; relative strength will use raw momentum.")
+        return {"mom_5d": 0.0, "mom_20d": 0.0}
 
 
 def fetch_universe_data(tickers: list[str], max_workers: int = MAX_WORKERS,
@@ -311,6 +342,12 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
     # حذف سهام خیلی ارزان (penny-stock-like) که نوسان و ریسک غیرعادی دارند
     if "current_price" in df.columns:
         df = df[df["current_price"].fillna(0) >= min_price]
+
+    # فیلتر نقدشوندگی: ارزش بازار بالا کافی نیست اگر حجم معاملات روزانه کم
+    # باشد - ورود/خروج سریع (که در معاملات کوتاه‌مدت حیاتی است) سخت می‌شود
+    if "avg_dollar_volume" in df.columns:
+        df = df[df["avg_dollar_volume"].fillna(0) >= MIN_DOLLAR_VOLUME]
+
     print(f"  Quality filter: {len(df)} of {before} stocks passed.")
     return df
 
@@ -331,14 +368,27 @@ def normalize(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
     return ranks
 
 
-def score_momentum(df: pd.DataFrame) -> pd.Series:
+def score_momentum(df: pd.DataFrame, benchmark: dict = None) -> pd.Series:
+    """به‌جای مومنتوم خام، قدرت نسبی به بازار (relative strength) را
+    می‌سنجد - مفهومی که رتبه‌بندی معروف IBD Relative Strength بر آن استوار
+    است. سهمی که هم‌زمان با رشد کل بازار رشد کرده، قدرت واقعی نشان نمی‌دهد.
+    توجه: مومنتوم ۵ روزه ذاتاً نویزی‌تر از ۲۰ روزه است (پدیده «بازگشت
+    کوتاه‌مدت» در ادبیات مالی می‌گوید حرکات خیلی کوتاه گاهی معکوس می‌شوند)،
+    به همین دلیل وزن کمتری نسبت به مومنتوم ۲۰ روزه دارد."""
+    benchmark = benchmark or {"mom_5d": 0.0, "mom_20d": 0.0}
     score, n = pd.Series(0.0, index=df.index), 0
     if "mom_5d" in df.columns:
-        score += normalize(df["mom_5d"], True).fillna(0.5); n += 1
+        rel_5d = df["mom_5d"] - benchmark["mom_5d"]
+        # وزن این سیگنال را به نصف کاهش می‌دهیم (با میانگین‌گیری با مقدار خنثی ۰.۵)
+        # چون مومنتوم ۵ روزه نویزی‌تر و مستعد بازگشت کوتاه‌مدت است
+        shrunk = 0.5 * normalize(rel_5d, True).fillna(0.5) + 0.5 * 0.5
+        score += shrunk; n += 1
     if "mom_20d" in df.columns:
-        score += normalize(df["mom_20d"], True).fillna(0.5); n += 1
+        rel_20d = df["mom_20d"] - benchmark["mom_20d"]
+        score += normalize(rel_20d, True).fillna(0.5); n += 1
     if "rsi" in df.columns:
         # برای کوتاه‌مدت، RSI متوسط رو به بالا (۵۰-۷۰) بهتر از اشباع خرید/فروش است
+        # (این یک قاعده تجربی رایج بین معامله‌گران است، نه یافته آکادمیک اثبات‌شده)
         def rsi_score(r):
             if pd.isna(r): return 0.5
             if 50 <= r <= 70: return 0.9
@@ -347,6 +397,15 @@ def score_momentum(df: pd.DataFrame) -> pd.Series:
             return 0.6
         score += df["rsi"].map(rsi_score); n += 1
     return score / n if n else score
+
+
+def score_trend(df: pd.DataFrame) -> pd.Series:
+    """فیلتر «هم‌جهت با روند»: معامله در خلاف جهت روند بلندمدت‌تر
+    ("گرفتن چاقوی در حال سقوط") ریسک بالاتری دارد، حتی با سیگنال کوتاه‌مدت
+    مثبت. این امتیاز صرفاً یک گرایش است، نه فیلتر سخت‌گیرانه."""
+    if "above_sma50" not in df.columns:
+        return pd.Series(0.5, index=df.index)
+    return df["above_sma50"].map({True: 1.0, False: 0.15}).fillna(0.5)
 
 
 def score_volume(df: pd.DataFrame) -> pd.Series:
@@ -381,6 +440,8 @@ def score_breakout(df: pd.DataFrame) -> pd.Series:
 
 def explain_pick(row: pd.Series) -> str:
     reasons = []
+    if row.get("above_sma50"):
+        reasons.append("هم‌جهت با روند صعودی میان‌مدت")
     if row.get("near_breakout"):
         reasons.append("نزدیک به شکست سقف ۲۰ روزه")
     if row.get("macd_bullish_cross"):
@@ -389,8 +450,8 @@ def explain_pick(row: pd.Series) -> str:
         reasons.append("مومنتوم MACD مثبت")
     if pd.notna(row.get("volume_ratio")) and row["volume_ratio"] > 1.3:
         reasons.append(f"حجم معاملات {row['volume_ratio']:.1f} برابر میانگین")
-    if pd.notna(row.get("mom_5d")) and row["mom_5d"] > 0.03:
-        reasons.append(f"رشد {row['mom_5d']*100:.1f}٪ در ۵ روز اخیر")
+    if pd.notna(row.get("mom_20d")) and row["mom_20d"] > 0.05:
+        reasons.append(f"رشد {row['mom_20d']*100:.1f}٪ در ۲۰ روز اخیر (قوی‌تر از بازار)")
     if pd.notna(row.get("days_to_earnings")) and 0 <= row["days_to_earnings"] <= 5:
         reasons.append("⚠️ گزارش مالی نزدیک - نوسان غیرمنتظره محتمل")
     return "، ".join(reasons) if reasons else "امتیاز متعادل در چند سیگنال کوتاه‌مدت"
@@ -451,6 +512,9 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     # ترکیبی اروپا+آمریکا) و هم برای نمایش نهایی لازم است.
     fx_rate = get_usd_to_eur_rate() if DISPLAY_CURRENCY == "EUR" else None
 
+    print("Fetching benchmark (SPY) for relative strength...")
+    benchmark = get_benchmark_returns()
+
     print("Fetching short-term price/volume data...")
     df = fetch_universe_data(tickers)
     df = apply_quality_filters(df, min_market_cap=min_market_cap, fx_rate_usd_eur=fx_rate)
@@ -458,16 +522,18 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
         print("No stocks passed the quality filters.")
         return df
 
-    df["momentum_score"] = score_momentum(df)
+    df["momentum_score"] = score_momentum(df, benchmark)
     df["volume_score"] = score_volume(df)
     df["macd_score"] = score_macd(df)
     df["breakout_score"] = score_breakout(df)
+    df["trend_score"] = score_trend(df)
 
     df["total_score"] = (
         df["momentum_score"] * WEIGHT_MOMENTUM
         + df["volume_score"] * WEIGHT_VOLUME
         + df["macd_score"] * WEIGHT_MACD
         + df["breakout_score"] * WEIGHT_BREAKOUT
+        + df["trend_score"] * WEIGHT_TREND
     )
     df = df.sort_values("total_score", ascending=False)
     picks = diversify_top_picks(df, top_n)
