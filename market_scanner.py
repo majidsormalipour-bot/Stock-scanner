@@ -57,14 +57,19 @@ DISPLAY_CURRENCY = "EUR"    # واحد پول نمایشی گزارش. "USD" ی�
 
 
 def get_usd_to_eur_rate() -> float:
-    """نرخ لحظه‌ای تبدیل دلار به یورو را می‌گیرد؛ در صورت خطا نرخ تقریبی ثابت می‌دهد."""
+    """نرخ لحظه‌ای تبدیل دلار به یورو را می‌گیرد؛ در صورت خطا یا داده
+    نامعتبر (NaN) نرخ تقریبی ثابت می‌دهد. بررسی صرفِ «خالی نبودن» کافی
+    نیست - گاهی یاهو یک ردیف ناقص با مقدار NaN برمی‌گرداند که اگر رد شود،
+    ضرب همه قیمت‌های دلاری در NaN باعث خالی‌شدن کل گزارش می‌شود."""
     try:
         rate_hist = yf.Ticker("USDEUR=X").history(period="5d")
         if not rate_hist.empty:
-            return float(rate_hist["Close"].iloc[-1])
+            rate = float(rate_hist["Close"].iloc[-1])
+            if pd.notna(rate) and 0.5 < rate < 1.5:  # محدوده منطقی برای این جفت‌ارز
+                return rate
     except Exception:
         pass
-    print("  Could not fetch live USD/EUR rate, using fallback ~0.86")
+    print("  Could not fetch valid live USD/EUR rate, using fallback ~0.86")
     return 0.86
 
 
@@ -500,9 +505,15 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 
     # تبدیل قیمت به ارز نمایشی، با توجه به ارز اصلی هر سهم (سهام اروپایی
     # از قبل به یورو هستند و نیازی به تبدیل ندارند؛ فقط سهام دلاری تبدیل می‌شوند)
-    if DISPLAY_CURRENCY == "EUR" and "current_price" in picks.columns:
+    if DISPLAY_CURRENCY == "EUR" and "current_price" in picks.columns and pd.notna(fx_rate):
+        original_prices = picks["current_price"].copy()  # لایه ایمنی: اگر تبدیل خراب شد، برگردیم به این
         is_usd = picks.get("currency", "USD") != "EUR"
         picks.loc[is_usd, "current_price"] = picks.loc[is_usd, "current_price"] * fx_rate
+        # اگر با وجود همه بررسی‌ها بازهم NaN تولید شد، با نرخ ثابت تقریبی
+        # (نه قیمت خام دلاری) جایگزین می‌کنیم تا برچسب یورو گمراه‌کننده نشود
+        broken = picks["current_price"].isna() & original_prices.notna() & is_usd
+        if broken.any():
+            picks.loc[broken, "current_price"] = original_prices[broken] * 0.86
 
     csv_file = "market_scan_results.csv"
     df.to_csv(csv_file, encoding="utf-8-sig")
