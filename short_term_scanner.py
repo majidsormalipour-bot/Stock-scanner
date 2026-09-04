@@ -72,12 +72,14 @@ DISPLAY_CURRENCY = "EUR"    # واحد پول نمایشی گزارش. "USD" ی�
 
 
 def get_usd_to_eur_rate() -> float:
-    """نرخ لحظه‌ای تبدیل دلار به یورو را می‌گیرد. در صورت خطا یک نرخ
-    تقریبی ثابت برمی‌گرداند تا اسکریپت متوقف نشود."""
+    """نرخ لحظه‌ای تبدیل دلار به یورو را می‌گیرد. در صورت خطا یا داده
+    نامعتبر (NaN) یک نرخ تقریبی ثابت برمی‌گرداند."""
     try:
         rate_hist = yf.Ticker("USDEUR=X").history(period="5d")
         if not rate_hist.empty:
-            return float(rate_hist["Close"].iloc[-1])
+            rate = float(rate_hist["Close"].iloc[-1])
+            if pd.notna(rate) and 0.5 < rate < 1.5:
+                return rate
     except Exception:
         pass
     print("  ⚠️ Could not fetch live USD/EUR rate, using fallback ~0.86")
@@ -541,11 +543,15 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 
     # تبدیل به ارز نمایشی؛ فقط سهام دلاری تبدیل می‌شوند، سهام اروپایی از
     # قبل به یورو هستند (هم قیمت و هم حد ضرر که از همان قیمت مشتق شده)
-    if DISPLAY_CURRENCY == "EUR":
+    if DISPLAY_CURRENCY == "EUR" and pd.notna(fx_rate):
         is_usd = picks.get("currency", "USD") != "EUR"
         for col in ["current_price", "suggested_stop"]:
             if col in picks.columns:
+                original = picks[col].copy()
                 picks.loc[is_usd, col] = picks.loc[is_usd, col] * fx_rate
+                broken = picks[col].isna() & original.notna() & is_usd
+                if broken.any():
+                    picks.loc[broken, col] = original[broken] * 0.86
 
     csv_file = "short_term_scan_results.csv"
     df.to_csv(csv_file, encoding="utf-8-sig")
