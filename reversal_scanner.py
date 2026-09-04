@@ -73,7 +73,9 @@ def get_usd_to_eur_rate() -> float:
     try:
         rate_hist = yf.Ticker("USDEUR=X").history(period="5d")
         if not rate_hist.empty:
-            return float(rate_hist["Close"].iloc[-1])
+            rate = float(rate_hist["Close"].iloc[-1])
+            if pd.notna(rate) and 0.5 < rate < 1.5:
+                return rate
     except Exception:
         pass
     print("  Could not fetch live USD/EUR rate, using fallback ~0.86")
@@ -239,6 +241,7 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
         if error_count:
             print(f"  Note: {error_count} of {before} tickers had a fetch error.")
         df = df[df["error"].isna()]
+    print(f"  After error filter: {len(df)} remain.")
 
     if "market_cap" in df.columns and min_market_cap:
         market_cap_usd = df["market_cap"].copy()
@@ -246,20 +249,27 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
             is_eur = df["currency"] == "EUR"
             market_cap_usd.loc[is_eur] = df.loc[is_eur, "market_cap"] / fx_rate_usd_eur
         df = df[market_cap_usd.fillna(0) >= min_market_cap]
+    print(f"  After market-cap filter: {len(df)} remain.")
 
     if "avg_dollar_volume" in df.columns:
         df = df[df["avg_dollar_volume"].fillna(0) >= MIN_DOLLAR_VOLUME]
+    print(f"  After liquidity filter: {len(df)} remain.")
 
     # هسته اصلی این اسکنر: فقط سهامی که واقعاً در محدوده افت "جالب" هستند
     # - نه خیلی کم افتاده (دیگر "فرصت بازگشت" نیست)
     # - نه خیلی زیاد افتاده (احتمالاً یک مشکل ساختاری جدی دارد)
     if "pct_from_52w_high" in df.columns:
         drawdown = -df["pct_from_52w_high"]  # مثبت می‌کنیم برای خوانایی
+        if not drawdown.dropna().empty:
+            print(f"  Drawdown stats: min={drawdown.min():.3f}, median={drawdown.median():.3f}, "
+                  f"max={drawdown.max():.3f}, non-null={drawdown.notna().sum()}")
         df = df[(drawdown >= MIN_DRAWDOWN_FROM_HIGH) & (drawdown <= MAX_DRAWDOWN_FROM_HIGH)]
+    print(f"  After drawdown-range filter ({MIN_DRAWDOWN_FROM_HIGH}-{MAX_DRAWDOWN_FROM_HIGH}): {len(df)} remain.")
 
     key_fields = [c for c in ["pe_ratio", "ev_to_ebitda", "revenue_growth", "profit_margin",
                                "roe", "rsi"] if c in df.columns]
     df = df[df[key_fields].notna().sum(axis=1) >= min_data_fields]
+    print(f"  After data-completeness filter (>={min_data_fields} of {len(key_fields)} fields): {len(df)} remain.")
 
     print(f"  Quality filter: {len(df)} of {before} stocks passed.")
     return df
@@ -450,9 +460,13 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     picks = diversify_top_picks(df, top_n)
     picks = revalidate_prices(picks)
 
-    if DISPLAY_CURRENCY == "EUR":
+    if DISPLAY_CURRENCY == "EUR" and pd.notna(fx_rate):
+        original_prices = picks["current_price"].copy()
         is_usd = picks.get("currency", "USD") != "EUR"
         picks.loc[is_usd, "current_price"] = picks.loc[is_usd, "current_price"] * fx_rate
+        broken = picks["current_price"].isna() & original_prices.notna() & is_usd
+        if broken.any():
+            picks.loc[broken, "current_price"] = original_prices[broken] * 0.86
 
     csv_file = "reversal_scan_results.csv"
     df.to_csv(csv_file, encoding="utf-8-sig")
