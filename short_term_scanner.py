@@ -209,8 +209,9 @@ def fetch_one(ticker: str) -> dict:
             mom_5d = (close.iloc[-1] / close.iloc[-6] - 1) if len(close) >= 6 else np.nan
             mom_20d = (close.iloc[-1] / close.iloc[-21] - 1) if len(close) >= 21 else np.nan
 
-            # حجم معاملات نسبت به میانگین ۲۰ روزه
-            avg_vol_20 = volume.rolling(20).mean().iloc[-1]
+            # حجم معاملات نسبت به میانگین ۲۰ روزه. min_periods جلوی خرابی
+            # کامل محاسبه را می‌گیرد اگر داده حجم روز آخر هنوز کامل نشده باشد
+            avg_vol_20 = volume.rolling(20, min_periods=15).mean().iloc[-1]
             vol_ratio = (volume.iloc[-1] / avg_vol_20) if avg_vol_20 and avg_vol_20 > 0 else np.nan
 
             # MACD
@@ -237,8 +238,11 @@ def fetch_one(ticker: str) -> dict:
             above_sma50 = bool(price > sma50) if pd.notna(sma50) else None
 
             # نقدشوندگی واقعی: ارزش بازار بالا کافی نیست اگر حجم معاملات
-            # روزانه کم باشد - ورود/خروج بدون تأثیر روی قیمت سخت می‌شود
-            avg_dollar_volume = float((close * volume).rolling(20).mean().iloc[-1])
+            # روزانه کم باشد - ورود/خروج بدون تأثیر روی قیمت سخت می‌شود.
+            # min_periods=15 در برابر داده ناقص روز آخر مقاوم است.
+            avg_dollar_volume = float(
+                (close * volume).rolling(20, min_periods=15).mean().iloc[-1]
+            )
 
             row.update({
                 "current_price": price,
