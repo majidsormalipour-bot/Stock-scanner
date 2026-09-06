@@ -189,7 +189,14 @@ def fetch_one(ticker: str) -> dict:
             made_new_low_last_3d = bool(close.iloc[-3:].min() <= recent_low_20d * 1.001)
             mom_5d = (close.iloc[-1] / close.iloc[-6] - 1) if len(close) >= 6 else np.nan
 
-            avg_dollar_volume = float((close * volume).rolling(20).mean().iloc[-1])
+            # نکته: اگر روز آخر (روز اجرای اسکریپت) هنوز کامل ثبت نشده باشد،
+            # حجم معاملات می‌تواند NaN باشد. rolling(20).mean() به‌صورت
+            # پیش‌فرض حتی با یک مقدار NaN در این ۲۰ روز، کل نتیجه را NaN
+            # می‌کند - و چون همه سهام هم‌زمان این مشکل را دارند، کل فیلتر
+            # نقدشوندگی خراب می‌شود. با min_periods مقاوم‌تر می‌کنیم.
+            avg_dollar_volume = float(
+                (close * volume).rolling(20, min_periods=15).mean().iloc[-1]
+            )
 
             row.update({
                 "current_price": price,
