@@ -7,7 +7,7 @@ on:
   workflow_dispatch: {}   # امکان اجرای دستی از تب Actions در گیت‌هاب
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
@@ -50,6 +50,16 @@ jobs:
           SCANNER_BATCH_DELAY: "1.5"
         run: python reversal_scanner.py --top 15
         continue-on-error: true
+
+      # هر سه اسکنر فایل data/universe_history.jsonl را به‌روزرسانی می‌کنند
+      # (ماژول universe_tracking.py) - چون هر اجرای Actions روی یک runner
+      # تازه/ephemeral انجام می‌شود، اگر این فایل commit نشود، تاریخچه هر
+      # روز از صفر شروع می‌شود و کل هدف ردیابی point-in-time بی‌اثر می‌ماند.
+      - name: Commit updated universe history
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update universe history [skip ci]"
+          file_pattern: "data/universe_history.jsonl"
 
       - name: Assemble site folder
         run: |
