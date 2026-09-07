@@ -32,14 +32,29 @@
 
 import argparse
 import io
+import logging
 import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# ماژول‌های کاهش خطا (اضافه‌شده) - non-invasive؛ اگر در دسترس نباشند
+# اسکنر باید بدون آن‌ها هم کار کند.
+try:
+    from data_validation import cross_validate_prices, validation_summary
+except ImportError:
+    cross_validate_prices = validation_summary = None
+
+try:
+    from universe_tracking import diff_and_log_universe
+except ImportError:
+    diff_and_log_universe = None
 
 warnings.filterwarnings("ignore")
 
@@ -514,6 +529,18 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
         tickers = loader()
         print(f"  Found {len(tickers)} tickers.")
 
+        if diff_and_log_universe is not None:
+            try:
+                os.makedirs("data", exist_ok=True)
+                udiff = diff_and_log_universe(
+                    tickers, universe, history_path="data/universe_history.jsonl"
+                )
+                if udiff.size_alert or udiff.churn_alert:
+                    print(f"  ⚠️ هشدار یونیورس: {udiff.size_alert_reason} "
+                          f"(churn={len(udiff.added) + len(udiff.removed)})")
+            except Exception as e:
+                print(f"  (universe tracking skipped: {e})")
+
     # نرخ ارز را زود می‌گیریم چون هم برای فیلتر ارزش بازار (در یونیورس
     # ترکیبی اروپا+آمریکا) و هم برای نمایش نهایی لازم است.
     fx_rate = get_usd_to_eur_rate() if DISPLAY_CURRENCY == "EUR" else None
@@ -523,6 +550,21 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 
     print("Fetching short-term price/volume data...")
     df = fetch_universe_data(tickers)
+
+    if cross_validate_prices is not None and validation_summary is not None and len(df) > 0:
+        try:
+            sample_df = df.reset_index()
+            results = cross_validate_prices(
+                sample_df, ticker_col="ticker", price_col="current_price",
+                volume_col=None, sample_frac=0.1, min_sample=10, batch_delay=1.0,
+            )
+            summary = validation_summary(results)
+            print(f"  Cross-validation (Stooq sample): {summary}")
+            if summary.get("systemic_alert"):
+                print("  ⚠️ نرخ پرچم‌خوردن غیرعادی بالا - داده امروز را با احتیاط بیشتری بررسی کنید.")
+        except Exception as e:
+            print(f"  (price cross-validation skipped: {e})")
+
     df = apply_quality_filters(df, min_market_cap=min_market_cap, fx_rate_usd_eur=fx_rate)
     if df.empty:
         print("No stocks passed the quality filters.")
