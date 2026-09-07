@@ -26,14 +26,47 @@
 """
 
 import argparse
+import logging
 import time
 import warnings
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+# سطح INFO را نمایش می‌دهد تا لاگ‌های ماژول‌های کاهش خطا (مثلا تعداد
+# مقادیر outlier پاک‌سازی‌شده) در کنسول قابل مشاهده باشند.
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# ماژول‌های کاهش خطا (اضافه‌شده) - هرکدام مستقل و non-invasive‌اند؛
+# اگر importشان به هر دلیلی شکست بخورد، اسکنر باید همچنان کار کند،
+# فقط بدون آن لایه اضافی از اعتبارسنجی.
+try:
+    from data_validation import validate_fundamentals, cross_validate_prices, validation_summary
+except ImportError:
+    validate_fundamentals = cross_validate_prices = validation_summary = None
+
+try:
+    from universe_tracking import diff_and_log_universe
+except ImportError:
+    diff_and_log_universe = None
+
+try:
+    from sector_overrides import apply_sector_overrides
+except ImportError:
+    apply_sector_overrides = None
+
+try:
+    from analyst_signal import adjusted_analyst_score
+except ImportError:
+    adjusted_analyst_score = None
+
+try:
+    from financial_freshness import apply_freshness_check
+except ImportError:
+    apply_freshness_check = None
 
 warnings.filterwarnings("ignore")
 
@@ -179,8 +212,12 @@ def fetch_one(ticker: str) -> dict:
                 "dividend_yield": info.get("dividendYield"),
                 # نظر تحلیل‌گران حرفه‌ای وال‌استریت
                 "target_mean_price": info.get("targetMeanPrice"),
+                "target_low_price": info.get("targetLowPrice"),
+                "target_high_price": info.get("targetHighPrice"),
                 "num_analysts": info.get("numberOfAnalystOpinions"),
                 "recommendation": info.get("recommendationKey"),
+                # برای چک تازگی داده مالی (TTM) - یونیکس تایم‌استمپ آخرین گزارش فصلی
+                "most_recent_quarter": info.get("mostRecentQuarter"),
             })
             if row.get("free_cashflow") and row.get("market_cap"):
                 row["fcf_yield"] = row["free_cashflow"] / row["market_cap"]  # جریان نقدی آزاد نسبت به ارزش بازار - معیار ارزندگی مورد علاقه سرمایه‌گذاران ارزشی
@@ -278,8 +315,14 @@ def apply_quality_filters(df: pd.DataFrame, min_market_cap: float, fx_rate_usd_e
     # واحد روی همه صنایع، عملاً کل بخش مالی را حذف می‌کند - این یک خطای
     # روش‌شناسی رایج در غربالگری‌های ساده است.
     if "debt_to_equity" in df.columns and "sector" in df.columns:
-        leverage_exempt_sectors = {"Financial Services", "Financials", "Utilities"}
-        is_exempt = df["sector"].isin(leverage_exempt_sectors)
+        # از برچسب صنعتی «مؤثر» استفاده می‌شود اگر override اصلاحی موجود
+        # باشد (ماژول sector_overrides) - چون برچسب خام yfinance گاهی برای
+        # هلدینگ‌ها یا شرکت‌های دوگانه‌کاره نادرست/گمراه‌کننده است.
+        if "is_high_leverage_sector" in df.columns:
+            is_exempt = df["is_high_leverage_sector"]
+        else:
+            leverage_exempt_sectors = {"Financial Services", "Financials", "Utilities"}
+            is_exempt = df["sector"].isin(leverage_exempt_sectors)
         safe_leverage = df["debt_to_equity"].isna() | (df["debt_to_equity"] < 300)
         df = df[is_exempt | safe_leverage]
 
@@ -313,9 +356,12 @@ def normalize(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
 
 def sector_relative_normalize(df: pd.DataFrame, col: str, higher_is_better: bool = True) -> pd.Series:
     """به‌جای مقایسه با کل بازار، هر سهم را با هم‌صنعتی‌های خودش مقایسه می‌کند.
-    این کار جلوی مقایسه ناعادلانه (مثلاً بانک با شرکت فناوری) را می‌گیرد."""
+    این کار جلوی مقایسه ناعادلانه (مثلاً بانک با شرکت فناوری) را می‌گیرد.
+    از 'effective_sector' استفاده می‌کند اگر ماژول sector_overrides قبلا
+    اجرا شده باشد (برچسب اصلاح‌شده)، وگرنه از برچسب خام 'sector'."""
+    group_col = "effective_sector" if "effective_sector" in df.columns else "sector"
     result = pd.Series(0.5, index=df.index)
-    for sector, group in df.groupby("sector"):
+    for sector, group in df.groupby(group_col):
         result.loc[group.index] = normalize(group[col], higher_is_better)
     return result
 
@@ -473,6 +519,22 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
         tickers = loader()
         print(f"  Found {len(tickers)} tickers.")
 
+        # چک سلامت یونیورس: اگر اسکریپینگ ویکی‌پدیا خراب شده باشد (مثلا
+        # فقط ۵۰ نماد به‌جای ۵۰۰ برگرداند)، این معمولا بی‌سروصدا رخ می‌دهد.
+        # اینجا فقط لاگ/هشدار می‌دهیم؛ خود اجرای اسکن را متوقف نمی‌کنیم چون
+        # ممکن است هشدار کاذب باشد (مثلا یک بازنگری واقعی شاخص).
+        if diff_and_log_universe is not None:
+            try:
+                os.makedirs("data", exist_ok=True)
+                udiff = diff_and_log_universe(
+                    tickers, universe, history_path="data/universe_history.jsonl"
+                )
+                if udiff.size_alert or udiff.churn_alert:
+                    print(f"  ⚠️ هشدار یونیورس: {udiff.size_alert_reason} "
+                          f"(churn={len(udiff.added) + len(udiff.removed)})")
+            except Exception as e:
+                print(f"  (universe tracking skipped: {e})")
+
     # نرخ ارز را زود می‌گیریم چون هم برای فیلتر ارزش بازار (در یونیورس
     # ترکیبی که شرکت‌های اروپایی و آمریکایی دارد) و هم برای نمایش نهایی لازم است.
     fx_rate = get_usd_to_eur_rate() if DISPLAY_CURRENCY == "EUR" else None
@@ -482,6 +544,44 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     # گزارش کامل فارسی در فایل HTML قابل مشاهده صحیح خواهد بود.
     print("Fetching price & fundamental data (this can take a few minutes)...")
     df = fetch_universe_data(tickers)
+
+    # --- لایه‌های کاهش خطا (اضافه‌شده) ---
+    # همه این مراحل عمدا قبل از فیلتر کیفیت اجرا می‌شوند و روی خود ستون‌ها
+    # کار می‌کنند (نه روی ایندکس)، پس نیاز به reset_index/set_index موقت دارند.
+    df = df.reset_index()
+
+    if apply_sector_overrides is not None:
+        df = apply_sector_overrides(df, ticker_col="ticker", sector_col="sector")
+
+    if validate_fundamentals is not None:
+        df = validate_fundamentals(
+            df, fields=["pe_ratio", "ev_to_ebitda", "peg_ratio", "debt_to_equity",
+                        "current_ratio", "roe", "fcf_yield"]
+        )
+
+    if apply_freshness_check is not None and "most_recent_quarter" in df.columns:
+        df["last_fiscal_date"] = pd.to_datetime(
+            df["most_recent_quarter"], unit="s", errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+        df = apply_freshness_check(df, ticker_col="ticker", fiscal_date_col="last_fiscal_date",
+                                    price_col="current_price")
+
+    df = df.set_index("ticker")
+
+    if cross_validate_prices is not None and validation_summary is not None and len(df) > 0:
+        try:
+            sample_df = df.reset_index()
+            results = cross_validate_prices(
+                sample_df, ticker_col="ticker", price_col="current_price",
+                volume_col=None, sample_frac=0.1, min_sample=10, batch_delay=1.0,
+            )
+            summary = validation_summary(results)
+            print(f"  Cross-validation (Stooq sample): {summary}")
+            if summary.get("systemic_alert"):
+                print("  ⚠️ نرخ پرچم‌خوردن غیرعادی بالا - داده امروز را با احتیاط بیشتری بررسی کنید.")
+        except Exception as e:
+            print(f"  (price cross-validation skipped: {e})")
+
     df = apply_quality_filters(df, min_market_cap=min_market_cap, fx_rate_usd_eur=fx_rate)
     if df.empty:
         print("No stocks passed the quality filters. Try lowering --min-market-cap.")
@@ -491,6 +591,24 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     df["quality_score"] = score_quality(df)
     df["technical_score"] = score_technical(df)
     df["analyst_score"] = score_analyst(df)
+
+    # تعدیل امتیاز تحلیل‌گران بر اساس پراکندگی نظرات و تازگی قیمت هدف
+    # (ماژول analyst_signal) - وزن ۱۵٪ زیر همچنان همان است، فقط خود
+    # analyst_score حالا میزان اطمینان به آن را هم منعکس می‌کند.
+    if adjusted_analyst_score is not None and "target_mean_price" in df.columns:
+        adjusted_scores = []
+        for ticker, row in df.iterrows():
+            adj, _details = adjusted_analyst_score(
+                raw_analyst_score=row["analyst_score"],
+                ticker=ticker,
+                current_price=row.get("current_price"),
+                target_mean=row.get("target_mean_price"),
+                target_low=row.get("target_low_price"),
+                target_high=row.get("target_high_price"),
+                n_analysts=row.get("num_analysts") or 0,
+            )
+            adjusted_scores.append(adj)
+        df["analyst_score"] = adjusted_scores
 
     df["total_score"] = (
         df["growth_value_score"] * WEIGHT_GROWTH_VALUE
@@ -543,6 +661,8 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
         stale_flag = ""
         if row.get("price_was_stale"):
             stale_flag = ' <span style="color:#ffb74d;font-weight:bold;">⚠️ قیمت اولیه کهنه بود؛ اصلاح شد</span>'
+        if row.get("financial_freshness") == "stale":
+            stale_flag += ' <span style="color:#ffb74d;font-weight:bold;">⚠️ داده مالی قدیمی (TTM کهنه)</span>'
         price_date = row.get("price_date", "")
         rows_html.append(f"""
         <div class="card">

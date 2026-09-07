@@ -34,14 +34,38 @@
 
 import argparse
 import io
+import logging
 import os
 import time
 import warnings
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+logging.basicConfig(level=logging.INFO, format="%(message)s")
+
 import numpy as np
 import pandas as pd
 import yfinance as yf
+
+# ماژول‌های کاهش خطا (اضافه‌شده) - non-invasive.
+try:
+    from data_validation import validate_fundamentals, cross_validate_prices, validation_summary
+except ImportError:
+    validate_fundamentals = cross_validate_prices = validation_summary = None
+
+try:
+    from universe_tracking import diff_and_log_universe
+except ImportError:
+    diff_and_log_universe = None
+
+try:
+    from sector_overrides import apply_sector_overrides
+except ImportError:
+    apply_sector_overrides = None
+
+try:
+    from financial_freshness import apply_freshness_check
+except ImportError:
+    apply_freshness_check = None
 
 warnings.filterwarnings("ignore")
 
@@ -164,6 +188,8 @@ def fetch_one(ticker: str) -> dict:
                 "current_ratio": info.get("currentRatio"),
                 "roe": info.get("returnOnEquity"),
                 "free_cashflow": info.get("freeCashflow"),
+                # برای چک تازگی داده مالی (TTM)
+                "most_recent_quarter": info.get("mostRecentQuarter"),
             })
 
             hist = tk.history(period=HISTORY_PERIOD)
@@ -297,8 +323,11 @@ def normalize(series: pd.Series, higher_is_better: bool = True) -> pd.Series:
 
 
 def sector_relative_normalize(df: pd.DataFrame, col: str, higher_is_better: bool = True) -> pd.Series:
+    """از 'effective_sector' استفاده می‌کند اگر ماژول sector_overrides قبلا
+    اجرا شده باشد (برچسب اصلاح‌شده)، وگرنه از برچسب خام 'sector'."""
+    group_col = "effective_sector" if "effective_sector" in df.columns else "sector"
     result = pd.Series(0.5, index=df.index)
-    for sector, group in df.groupby("sector"):
+    for sector, group in df.groupby(group_col):
         result.loc[group.index] = normalize(group[col], higher_is_better)
     return result
 
@@ -364,8 +393,11 @@ def score_safety(df: pd.DataFrame) -> pd.Series:
     if "roe" in df.columns:
         score += sector_relative_normalize(df, "roe", True).fillna(0.5); n += 1
     if "debt_to_equity" in df.columns and "sector" in df.columns:
-        leverage_exempt = {"Financial Services", "Financials", "Utilities"}
-        is_exempt = df["sector"].isin(leverage_exempt)
+        if "is_high_leverage_sector" in df.columns:
+            is_exempt = df["is_high_leverage_sector"]
+        else:
+            leverage_exempt = {"Financial Services", "Financials", "Utilities"}
+            is_exempt = df["sector"].isin(leverage_exempt)
         de_score = sector_relative_normalize(df, "debt_to_equity", False).fillna(0.5)
         de_score.loc[is_exempt] = 0.5  # برای بانک/بیمه بی‌طرف - بدهی بالا طبیعی است
         score += de_score; n += 1
@@ -443,10 +475,58 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
         tickers = loader()
         print(f"  Found {len(tickers)} tickers.")
 
+        if diff_and_log_universe is not None:
+            try:
+                os.makedirs("data", exist_ok=True)
+                udiff = diff_and_log_universe(
+                    tickers, universe, history_path="data/universe_history.jsonl"
+                )
+                if udiff.size_alert or udiff.churn_alert:
+                    print(f"  ⚠️ هشدار یونیورس: {udiff.size_alert_reason} "
+                          f"(churn={len(udiff.added) + len(udiff.removed)})")
+            except Exception as e:
+                print(f"  (universe tracking skipped: {e})")
+
     fx_rate = get_usd_to_eur_rate() if DISPLAY_CURRENCY == "EUR" else None
 
     print("Fetching data for value/support screening...")
     df = fetch_universe_data(tickers)
+
+    # --- لایه‌های کاهش خطا (اضافه‌شده) ---
+    df = df.reset_index()
+
+    if apply_sector_overrides is not None:
+        df = apply_sector_overrides(df, ticker_col="ticker", sector_col="sector")
+
+    if validate_fundamentals is not None:
+        df = validate_fundamentals(
+            df, fields=["pe_ratio", "ev_to_ebitda", "peg_ratio", "debt_to_equity",
+                        "current_ratio", "roe"]
+        )
+
+    if apply_freshness_check is not None and "most_recent_quarter" in df.columns:
+        df["last_fiscal_date"] = pd.to_datetime(
+            df["most_recent_quarter"], unit="s", errors="coerce"
+        ).dt.strftime("%Y-%m-%d")
+        df = apply_freshness_check(df, ticker_col="ticker", fiscal_date_col="last_fiscal_date",
+                                    price_col="current_price")
+
+    df = df.set_index("ticker")
+
+    if cross_validate_prices is not None and validation_summary is not None and len(df) > 0:
+        try:
+            sample_df = df.reset_index()
+            results = cross_validate_prices(
+                sample_df, ticker_col="ticker", price_col="current_price",
+                volume_col=None, sample_frac=0.1, min_sample=10, batch_delay=1.0,
+            )
+            summary = validation_summary(results)
+            print(f"  Cross-validation (Stooq sample): {summary}")
+            if summary.get("systemic_alert"):
+                print("  ⚠️ نرخ پرچم‌خوردن غیرعادی بالا - داده امروز را با احتیاط بیشتری بررسی کنید.")
+        except Exception as e:
+            print(f"  (price cross-validation skipped: {e})")
+
     df = apply_quality_filters(df, min_market_cap=min_market_cap, fx_rate_usd_eur=fx_rate)
     if df.empty:
         print("No stocks passed the quality filters.")
@@ -507,6 +587,8 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
         stale_flag = ""
         if row.get("price_was_stale"):
             stale_flag = ' <span class="warn-inline">⚠️ قیمت اولیه کهنه بود؛ اصلاح شد</span>'
+        if row.get("financial_freshness") == "stale":
+            stale_flag += ' <span class="warn-inline">⚠️ داده مالی قدیمی (TTM کهنه) - دلیل افت را بررسی کنید</span>'
         rows_html.append(f"""
         <div class="card">
           <div class="card-header">
