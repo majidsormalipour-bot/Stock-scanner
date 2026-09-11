@@ -521,8 +521,10 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
                 volume_col=None, sample_frac=0.1, min_sample=10, batch_delay=1.0,
             )
             summary = validation_summary(results)
-            print(f"  Cross-validation (Stooq sample): {summary}")
-            if summary.get("systemic_alert"):
+            print(f"  Cross-validation (Twelve Data sample): {summary}")
+            if summary.get("fully_unavailable"):
+                print("  ⚠️ راستی‌آزمایی Twelve Data انجام نشد (TWELVEDATA_API_KEY تنظیم نشده یا سقف رد شده).")
+            elif summary.get("systemic_alert"):
                 print("  ⚠️ نرخ پرچم‌خوردن غیرعادی بالا - داده امروز را با احتیاط بیشتری بررسی کنید.")
         except Exception as e:
             print(f"  (price cross-validation skipped: {e})")
