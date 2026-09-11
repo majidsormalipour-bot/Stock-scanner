@@ -34,6 +34,7 @@ jobs:
         env:
           SCANNER_MAX_WORKERS: "2"
           SCANNER_BATCH_DELAY: "1.5"
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python market_scanner.py --top 15
         continue-on-error: true   # اگر یکی خطا داد، دیگری هم اجرا شود
 
@@ -41,6 +42,7 @@ jobs:
         env:
           SCANNER_MAX_WORKERS: "2"
           SCANNER_BATCH_DELAY: "1.5"
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python short_term_scanner.py --top 15
         continue-on-error: true
 
@@ -48,6 +50,7 @@ jobs:
         env:
           SCANNER_MAX_WORKERS: "2"
           SCANNER_BATCH_DELAY: "1.5"
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
         run: python reversal_scanner.py --top 15
         continue-on-error: true
 
