@@ -4,9 +4,18 @@ data_validation.py
 
 هدف: کاهش خطای ناشی از داده نادرست/ناقص yfinance، از طریق دو مکانیزم مستقل:
 
-  1) راستی‌آزمایی متقاطع نمونه‌ای قیمت/حجم با Stooq (منبع دوم رایگان،
-     بدون نیاز به API key) — چون نمی‌توان همه سهام را چک کرد بدون
-     تشدید مشکل rate-limiting یاهو که در README مستند شده.
+  1) راستی‌آزمایی متقاطع نمونه‌ای قیمت/حجم با Twelve Data (منبع دوم رایگان،
+     نیاز به یک API key رایگان دارد) — چون نمی‌توان همه سهام را چک کرد
+     بدون تشدید مشکل rate-limiting یاهو که در README مستند شده.
+
+     نکته مهم درباره انتخاب منبع: در ابتدا Stooq امتحان شد، ولی مشخص شد
+     Stooq با یک مکانیزم کپچا/کلید IP-محور کار می‌کند که فقط برای IPهای
+     مسدودشده (مثل دیتاسنترها/GitHub Actions) کپچا نشان می‌دهد - یعنی
+     گرفتن کلید از یک مرورگر خانگی (IP غیرمسدود) اصلا امکان‌پذیر نیست،
+     و even اگر کلیدی به‌دست بیاید معلوم نیست از IP دیتاسنتر کار کند.
+     Twelve Data برخلاف آن، دقیقا برای دسترسی برنامه‌ای/ابری طراحی شده:
+     ثبت‌نام با ایمیل، بدون کپچا، کلید فوری کار می‌کند - از جمله از
+     GitHub Actions. پلن رایگان: ۸۰۰ درخواست در روز، ۸ درخواست در دقیقه.
 
   2) پاک‌سازی آماری فیلدهای بنیادی قبل از ورود به فرمول امتیازدهی:
      - بازه منطقی فیزیکی (sanity bounds) برای هر فیلد
@@ -20,9 +29,8 @@ short_term_scanner.py / reversal_scanner.py) بدون تغییر منطق امت
 
 from __future__ import annotations
 
-import io
 import logging
-import random
+import os
 import time
 from dataclasses import dataclass
 from typing import Optional
@@ -35,42 +43,83 @@ logger = logging.getLogger("data_validation")
 
 
 # ===========================================================================
-# بخش ۱: راستی‌آزمایی متقاطع قیمت/حجم با Stooq
+# بخش ۱: راستی‌آزمایی متقاطع قیمت/حجم با Twelve Data
 # ===========================================================================
 
-STOOQ_URL = "https://stooq.com/q/d/l/?s={symbol}&i=d"
+TWELVEDATA_QUOTE_URL = "https://api.twelvedata.com/quote"
+
+# پلن رایگان: ۸ درخواست در دقیقه - یعنی حداقل ۷.۵ ثانیه فاصله بین درخواست‌ها.
+# کمی محافظه‌کارانه‌تر (۸ ثانیه) در نظر گرفته شده تا تاخیر شبکه هم پوشش داده شود.
+TWELVEDATA_MIN_DELAY_SECONDS = 8.0
 
 
-def _to_stooq_symbol(ticker: str) -> str:
+def _get_twelvedata_api_key() -> str:
     """
-    تبدیل نماد یاهو به فرمت Stooq (فقط برای سهام آمریکایی قابل اعتماد است؛
-    Stooq پوشش محدودتری برای سهام اروپایی دارد، پس این تابع را فقط برای
-    یونیورس sp500 به‌کار ببرید، نه eurostoxx50).
+    کلید رایگان را از https://twelvedata.com/pricing (پلن Basic/رایگان)
+    با ثبت‌نام ساده ایمیلی بگیرید - بدون کپچا، بلافاصله فعال است و از
+    هر IP (از جمله GitHub Actions) کار می‌کند. در متغیر محیطی
+    TWELVEDATA_API_KEY قرار دهید (مثلا به‌عنوان GitHub Secret).
     """
-    return f"{ticker.lower().replace('.', '-')}.us"
+    return os.environ.get("TWELVEDATA_API_KEY", "")
 
 
-def fetch_stooq_last_close(
+def _looks_like_us_ticker(ticker: str) -> bool:
+    """
+    فقط نمادهای بدون پسوند صرافی (heuristic برای سهام آمریکایی مثل
+    yfinance) را برای راستی‌آزمایی در نظر می‌گیریم - نمادهای اروپایی
+    معمولا پسوندی مثل .DE/.PA/.AS دارند که نگاشت آن‌ها به Twelve Data
+    نیاز به پارامتر exchange/mic_code جدا دارد و برای سادگی این‌جا رد
+    می‌شوند (فقط باعث کاهش اندازه نمونه می‌شود، نه خطا).
+    """
+    return "." not in ticker
+
+
+def fetch_twelvedata_last_close(
     ticker: str, session: Optional[requests.Session] = None, timeout: int = 8
 ) -> Optional[dict]:
-    """آخرین قیمت پایانی/حجم را از Stooq می‌گیرد؛ در صورت شکست None برمی‌گرداند."""
+    """آخرین قیمت پایانی/حجم را از Twelve Data می‌گیرد؛ در صورت شکست None برمی‌گرداند."""
+    api_key = _get_twelvedata_api_key()
+    if not api_key:
+        logger.warning(
+            "TWELVEDATA_API_KEY تنظیم نشده - راستی‌آزمایی قیمت انجام نمی‌شود. "
+            "کلید رایگان را از https://twelvedata.com/pricing بگیرید."
+        )
+        return None
+
+    if not _looks_like_us_ticker(ticker):
+        return None
+
     sess = session or requests
-    symbol = _to_stooq_symbol(ticker)
-    url = STOOQ_URL.format(symbol=symbol)
     try:
-        resp = sess.get(url, timeout=timeout)
+        resp = sess.get(
+            TWELVEDATA_QUOTE_URL,
+            params={"symbol": ticker, "apikey": api_key},
+            timeout=timeout,
+        )
         resp.raise_for_status()
-        df = pd.read_csv(io.StringIO(resp.text))
-        if df.empty or "Close" not in df.columns:
+        data = resp.json()
+
+        if isinstance(data, dict) and data.get("status") == "error":
+            code = data.get("code")
+            message = data.get("message", "")
+            if code == 429 or "limit" in message.lower():
+                logger.warning("سقف مجاز Twelve Data رد شده - راستی‌آزمایی امروز محدود می‌شود.")
+            else:
+                logger.warning("Twelve Data error برای %s: %s", ticker, message)
             return None
-        last_row = df.iloc[-1]
+
+        close = data.get("close")
+        volume = data.get("volume")
+        if close is None:
+            return None
+
         return {
-            "date": last_row.get("Date"),
-            "close": float(last_row["Close"]),
-            "volume": float(last_row.get("Volume", np.nan)),
+            "date": data.get("datetime"),
+            "close": float(close),
+            "volume": float(volume) if volume is not None else np.nan,
         }
     except Exception as e:
-        logger.warning("Stooq fetch failed for %s: %s", ticker, e)
+        logger.warning("Twelve Data fetch failed for %s: %s", ticker, e)
         return None
 
 
@@ -90,22 +139,31 @@ def cross_validate_prices(
     ticker_col: str = "ticker",
     price_col: str = "price",
     volume_col: Optional[str] = "volume",
-    sample_frac: float = 0.15,
+    sample_frac: float = 0.08,
     min_sample: int = 10,
+    max_sample: int = 40,
     price_tolerance: float = 0.03,
     volume_tolerance: float = 0.5,
-    batch_delay: float = 1.0,
+    batch_delay: float = TWELVEDATA_MIN_DELAY_SECONDS,
     random_seed: Optional[int] = None,
 ) -> list[ValidationResult]:
     """
-    یک نمونه تصادفی از سهام (نه همه) را با Stooq راستی‌آزمایی می‌کند، تا خطر
-    rate-limit اضافه‌ای روی همان مشکل مستندشده در README ایجاد نشود.
+    یک نمونه تصادفی از سهام (نه همه) را با Twelve Data راستی‌آزمایی می‌کند.
 
-    price_tolerance=0.03 عمدا سخت‌گیر نیست، چون یاهو و Stooq گاهی چند دقیقه
-    اختلاف تاخیر گزارش دارند و این طبیعی است، نه خطا.
+    max_sample=40 عمدا اضافه شده: با محدودیت ۸ درخواست/دقیقه پلن رایگان،
+    نمونه بزرگ‌تر باعث طولانی شدن غیرمنطقی اجرا می‌شود (۴۰ نمونه ≈ ۵.۵
+    دقیقه با تاخیر ۸ ثانیه‌ای). اگر نیاز به نمونه بزرگ‌تر دارید، یا پلن
+    پولی Twelve Data را در نظر بگیرید یا batch_delay را کاهش دهید (با
+    ریسک رد شدن سقف دقیقه‌ای).
+
+    price_tolerance=0.03 عمدا سخت‌گیر نیست، چون دو منبع مختلف گاهی چند
+    دقیقه اختلاف تاخیر گزارش دارند و این طبیعی است، نه خطا.
+
+    فقط نمادهای بدون پسوند صرافی (heuristic برای سهام آمریکایی) واقعا
+    چک می‌شوند؛ بقیه به‌عنوان 'reference_unavailable' علامت می‌خورند.
     """
     n = max(min_sample, int(len(df) * sample_frac))
-    n = min(n, len(df))
+    n = min(n, max_sample, len(df))
     sample = df.sample(n=n, random_state=random_seed)
 
     results: list[ValidationResult] = []
@@ -113,7 +171,7 @@ def cross_validate_prices(
 
     for i, (_, row) in enumerate(sample.iterrows()):
         ticker = row[ticker_col]
-        ref = fetch_stooq_last_close(ticker, session=session)
+        ref = fetch_twelvedata_last_close(ticker, session=session)
 
         if ref is None:
             results.append(
@@ -174,18 +232,31 @@ def validation_summary(results: list[ValidationResult]) -> dict:
     خلاصه آماری برای لاگ روزانه. اگر flag_rate بالا باشد، این معمولا نشانه
     یک مشکل سیستمی (مثلا نرخ ارز اشتباه یا تاخیر کل بازار) است، نه چند
     سهم خراب مجزا — و باید کل خروجی آن روز با احتیاط بیشتری بررسی شود.
+
+    اگر همه نمونه‌ها 'unavailable' باشند (مثلا چون TWELVEDATA_API_KEY تنظیم
+    نشده یا سقف روزانه/دقیقه‌ای رد شده)، این به‌عنوان یک هشدار جدا مشخص
+    می‌شود - چون flag_rate=0.0 در آن حالت گمراه‌کننده است (به این معنی
+    نیست که «همه چیز تایید شد»، بلکه اصلا چیزی چک نشده است).
     """
     total = len(results)
     flagged = sum(r.flagged for r in results)
     unavailable = sum(r.reason == "reference_unavailable" for r in results)
     checked = total - unavailable
     flag_rate = (flagged / checked) if checked else 0.0
+    fully_unavailable = total > 0 and checked == 0
+    if fully_unavailable:
+        logger.warning(
+            "راستی‌آزمایی Twelve Data برای هیچ نمونه‌ای انجام نشد (%d/%d نامعتبر) - "
+            "احتمالا TWELVEDATA_API_KEY تنظیم نشده یا سقف رد شده است.",
+            unavailable, total,
+        )
     return {
         "total_checked": checked,
         "unavailable": unavailable,
         "flagged": flagged,
         "flag_rate": round(flag_rate, 4),
         "systemic_alert": flag_rate > 0.20 and checked >= 5,
+        "fully_unavailable": fully_unavailable,
     }
 
 
@@ -281,7 +352,7 @@ from data_validation import (
 # --- قبل از رتبه‌بندی صدکی، فیلدهای بنیادی را پاک‌سازی کنید ---
 df = validate_fundamentals(df, fields=["pe_ratio", "ev_ebitda", "debt_to_equity", "roe"])
 
-# --- بعد از جمع‌آوری قیمت/حجم، یک نمونه را با Stooq چک کنید ---
+# --- بعد از جمع‌آوری قیمت/حجم، یک نمونه را با Twelve Data چک کنید ---
 results = cross_validate_prices(df, sample_frac=0.15, batch_delay=1.0)
 summary = validation_summary(results)
 logger.info("Cross-validation summary: %s", summary)
