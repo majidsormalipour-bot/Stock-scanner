@@ -7,6 +7,7 @@
 صرفا برای زمینه تفسیر، نه فیلتر کردن سهام (جزئیات در market_regime.py).
 """
 import datetime
+import os
 
 try:
     from market_regime import fetch_market_regime_via_yfinance, regime_interpretation
@@ -14,6 +15,15 @@ except ImportError:
     fetch_market_regime_via_yfinance = regime_interpretation = None
 
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
+performance_card_html = ""
+if os.path.exists("performance_scorecard.html") or os.path.exists("site/performance_scorecard.html"):
+    performance_card_html = """
+  <a class="card" href="performance_scorecard.html">
+    <span class="emoji">📈</span>
+    <div class="title">کارنامه عملکرد واقعی</div>
+    <div class="desc">آیا امتیازهای بالاتر واقعاً بازده بهتری داده‌اند؟ (به‌روزرسانی هفتگی)</div>
+  </a>"""
 
 regime_banner_html = ""
 if fetch_market_regime_via_yfinance is not None:
@@ -92,6 +102,7 @@ html = f"""<!DOCTYPE html>
     <div class="title">بازگشت از حمایت</div>
     <div class="desc">سهام افتاده ولی ارزنده، نزدیک سطح حمایت فنی</div>
   </a>
+  {performance_card_html}
 
   <p style="color:#666;font-size:11px;margin-top:24px;">
     این گزارش‌ها هر روز خودکار به‌روزرسانی می‌شوند و صرفاً بر پایه فرمول‌های

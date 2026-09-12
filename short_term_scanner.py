@@ -56,6 +56,11 @@ try:
 except ImportError:
     diff_and_log_universe = None
 
+try:
+    from picks_tracker import log_daily_picks
+except ImportError:
+    log_daily_picks = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -588,6 +593,13 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     df = df.sort_values("total_score", ascending=False)
     picks = diversify_top_picks(df, top_n)
     picks = revalidate_prices(picks)
+
+    if log_daily_picks is not None:
+        try:
+            log_daily_picks(picks, scanner_name="short_term_scanner",
+                             history_path="data/picks_history.jsonl")
+        except Exception as e:
+            print(f"  (picks tracking skipped: {e})")
 
     # تبدیل به ارز نمایشی؛ فقط سهام دلاری تبدیل می‌شوند، سهام اروپایی از
     # قبل به یورو هستند (هم قیمت و هم حد ضرر که از همان قیمت مشتق شده)

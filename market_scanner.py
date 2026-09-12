@@ -68,6 +68,11 @@ try:
 except ImportError:
     apply_freshness_check = None
 
+try:
+    from picks_tracker import log_daily_picks
+except ImportError:
+    log_daily_picks = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -622,6 +627,15 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 
     picks = diversify_top_picks(df, top_n)
     picks = revalidate_prices(picks)
+
+    # ثبت پیشنهادهای امروز با قیمت native (قبل از تبدیل ارز نمایشی) -
+    # پایه برای اندازه‌گیری عملکرد واقعی در آینده (performance_scorecard.py)
+    if log_daily_picks is not None:
+        try:
+            log_daily_picks(picks, scanner_name="market_scanner",
+                             history_path="data/picks_history.jsonl")
+        except Exception as e:
+            print(f"  (picks tracking skipped: {e})")
 
     # تبدیل قیمت به ارز نمایشی، با توجه به ارز اصلی هر سهم (سهام اروپایی
     # از قبل به یورو هستند و نیازی به تبدیل ندارند؛ فقط سهام دلاری تبدیل می‌شوند)
