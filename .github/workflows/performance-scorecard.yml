@@ -1,0 +1,46 @@
+name: Weekly Performance Scorecard
+
+on:
+  schedule:
+    # یک‌شنبه‌ها ساعت ۲۳:۰۰ UTC
+    - cron: "0 23 * * 0"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  scorecard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run performance scorecard
+        env:
+          SCANNER_BATCH_DELAY: "1.0"
+        run: python performance_scorecard.py
+
+      # عمدا اینجا صفحه Pages را دیپلوی نمی‌کنیم: گزارش‌های روزانه
+      # (market_scan_report.html و بقیه) در ریپو commit نمی‌شوند، فقط در
+      # همان اجرای daily-scan.yml تولید و مستقیم روی Pages آپلود می‌شوند.
+      # اگر این‌جا هم یک دیپلوی جدا انجام می‌دادیم، چون در checkout این
+      # workflow آن فایل‌ها اصلا وجود ندارند، دیپلوی جدید کل داشبورد را با
+      # یک site ناقص (بدون گزارش‌های روزانه) جایگزین می‌کرد و لینک‌ها را
+      # می‌شکست. راه‌حل: فقط خروجی این اسکریپت را commit می‌کنیم؛
+      # daily-scan.yml در اجرای روزانه بعدی خودش این فایل را در کنار
+      # گزارش‌های تازه به site/ اضافه و دیپلوی می‌کند (حداکثر یک روز تاخیر).
+      - name: Commit scorecard results
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "chore: update performance scorecard [skip ci]"
+          file_pattern: "performance_scorecard.html performance_detail.csv"
+
