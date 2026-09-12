@@ -61,6 +61,11 @@ try:
 except ImportError:
     log_daily_picks = None
 
+try:
+    from portfolio_correlation import analyze_concentration, build_html_note as build_concentration_note
+except ImportError:
+    analyze_concentration = build_concentration_note = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -616,8 +621,17 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     csv_file = "short_term_scan_results.csv"
     df.to_csv(csv_file, encoding="utf-8-sig")
 
+    concentration_note = ""
+    if analyze_concentration is not None and build_concentration_note is not None:
+        try:
+            concentration = analyze_concentration(picks.index.tolist())
+            concentration_note = build_concentration_note(concentration)
+        except Exception as e:
+            print(f"  (concentration analysis skipped: {e})")
+
     html_file = "short_term_scan_report.html"
-    write_html_report(picks, html_file, currency=DISPLAY_CURRENCY, fx_rate=fx_rate or 1.0)
+    write_html_report(picks, html_file, currency=DISPLAY_CURRENCY, fx_rate=fx_rate or 1.0,
+                       concentration_note=concentration_note)
 
     print(f"Done. Full data for {len(df)} stocks saved to {csv_file}")
     print(f"Readable Persian report saved to {html_file}")
@@ -630,7 +644,8 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     return picks
 
 
-def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rate: float = 1.0):
+def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rate: float = 1.0,
+                       concentration_note: str = ""):
     symbol = "€" if currency == "EUR" else "$"
     rows_html = []
     for ticker, row in df.iterrows():
@@ -702,6 +717,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
     «حد ضرر پیشنهادی» بر اساس نوسان‌پذیری اخیر هر سهم (ATR) محاسبه شده -
     رعایت آن برای مدیریت ریسک توصیه می‌شود. این گزارش توصیه مالی نیست.
   </div>
+  {concentration_note}
   {''.join(rows_html)}
 </body>
 </html>"""
