@@ -54,15 +54,16 @@ jobs:
         run: python reversal_scanner.py --top 15
         continue-on-error: true
 
-      # هر سه اسکنر فایل data/universe_history.jsonl را به‌روزرسانی می‌کنند
-      # (ماژول universe_tracking.py) - چون هر اجرای Actions روی یک runner
-      # تازه/ephemeral انجام می‌شود، اگر این فایل commit نشود، تاریخچه هر
-      # روز از صفر شروع می‌شود و کل هدف ردیابی point-in-time بی‌اثر می‌ماند.
-      - name: Commit updated universe history
+      # هر سه اسکنر هم data/universe_history.jsonl و هم data/picks_history.jsonl
+      # را به‌روزرسانی می‌کنند (universe_tracking.py و picks_tracker.py) -
+      # چون هر اجرای Actions روی یک runner تازه/ephemeral انجام می‌شود، اگر
+      # این فایل‌ها commit نشوند، تاریخچه هر روز از صفر شروع می‌شود و کل هدف
+      # ردیابی point-in-time / عملکرد واقعی بی‌اثر می‌ماند.
+      - name: Commit updated history files
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "chore: update universe history [skip ci]"
-          file_pattern: "data/universe_history.jsonl"
+          commit_message: "chore: update universe & picks history [skip ci]"
+          file_pattern: "data/universe_history.jsonl data/picks_history.jsonl"
 
       - name: Assemble site folder
         run: |
@@ -70,6 +71,11 @@ jobs:
           cp market_scan_report.html site/ 2>/dev/null || true
           cp short_term_scan_report.html site/ 2>/dev/null || true
           cp reversal_scan_report.html site/ 2>/dev/null || true
+          # این فایل فقط هفتگی (توسط performance-scorecard.yml) ساخته و
+          # commit می‌شود؛ اینجا فقط اگر از قبل در ریپو موجود باشد کپی
+          # می‌شود تا در روزهایی که فقط اسکن روزانه اجرا می‌شود هم در
+          # داشبورد باقی بماند.
+          cp performance_scorecard.html site/ 2>/dev/null || true
           python generate_index.py
 
       - name: Upload Pages artifact
