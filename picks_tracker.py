@@ -38,6 +38,7 @@ class PickRecord:
     price: float         # قیمت به ارز اصلی سهم (native)، نه ارز نمایشی تبدیل‌شده -
                           # تا در تحلیل بعدی نیازی به نگرانی درباره نرخ ارز نباشد
     currency: str
+    scoring_version: str = "unknown"  # شناسه نسخه وزن‌های امتیازدهی (scoring_version.py)
 
 
 def log_daily_picks(
@@ -48,11 +49,16 @@ def log_daily_picks(
     currency_col: str = "currency",
     history_path: str = "data/picks_history.jsonl",
     pick_date: Optional[str] = None,
+    scoring_version: str = "unknown",
 ) -> int:
     """
     هر ردیف از picks_df (که ایندکسش ticker است) را به‌عنوان یک رکورد جدید
     اضافه می‌کند. باید با قیمت *native* (قبل از تبدیل به ارز نمایشی) صدا
     زده شود - این مسئولیت فراخوان (خود اسکنر) است، نه این تابع.
+
+    scoring_version: شناسه نسخه وزن‌های امتیازدهی فعلی (از scoring_version.py) -
+    بدون این، اگر بعداً وزن‌ها تغییر کنند، performance_scorecard.py نمی‌تواند
+    نسخه‌های مختلف فرمول را از هم جدا کند و همبستگی امتیاز-بازده بی‌معنی می‌شود.
 
     برمی‌گرداند: تعداد رکوردهای نوشته‌شده.
     """
@@ -74,19 +80,22 @@ def log_daily_picks(
                 score=round(float(score), 6),
                 price=round(float(price), 4),
                 currency=str(row.get(currency_col, "USD")),
+                scoring_version=scoring_version,
             )
             f.write(json.dumps(asdict(record), ensure_ascii=False) + "\n")
             n_written += 1
 
-    logger.info("%d پیشنهاد از %s برای تاریخ %s ثبت شد.", n_written, scanner_name, pick_date)
+    logger.info("%d پیشنهاد از %s (نسخه فرمول: %s) برای تاریخ %s ثبت شد.",
+                n_written, scanner_name, scoring_version, pick_date)
     return n_written
 
 
 def load_picks_history(history_path: str = "data/picks_history.jsonl") -> pd.DataFrame:
-    """کل تاریخچه را به‌صورت DataFrame برمی‌گرداند (ستون‌ها: date, scanner, ticker, score, price, currency)."""
+    """کل تاریخچه را به‌صورت DataFrame برمی‌گرداند (ستون‌ها: date, scanner, ticker, score, price, currency, scoring_version)."""
     path = Path(history_path)
+    cols = ["date", "scanner", "ticker", "score", "price", "currency", "scoring_version"]
     if not path.exists():
-        return pd.DataFrame(columns=["date", "scanner", "ticker", "score", "price", "currency"])
+        return pd.DataFrame(columns=cols)
 
     records = []
     with path.open(encoding="utf-8") as f:
@@ -100,9 +109,15 @@ def load_picks_history(history_path: str = "data/picks_history.jsonl") -> pd.Dat
                 continue
 
     if not records:
-        return pd.DataFrame(columns=["date", "scanner", "ticker", "score", "price", "currency"])
+        return pd.DataFrame(columns=cols)
 
     df = pd.DataFrame(records)
+    # رکوردهای قدیمی‌تر (قبل از افزودن نسخه‌بندی فرمول) این ستون را ندارند -
+    # به‌جای خطا، با "unknown" پر می‌شود تا با رکوردهای جدید قابل ترکیب باشند.
+    if "scoring_version" not in df.columns:
+        df["scoring_version"] = "unknown"
+    else:
+        df["scoring_version"] = df["scoring_version"].fillna("unknown")
     df["date"] = pd.to_datetime(df["date"])
     return df
 
@@ -112,12 +127,16 @@ def load_picks_history(history_path: str = "data/picks_history.jsonl") -> pd.Dat
 # ===========================================================================
 """
 from picks_tracker import log_daily_picks
+from scoring_version import compute_version
+
+SCORING_VERSION = compute_version({"growth_value": WEIGHT_GROWTH_VALUE, ...})
 
 picks = diversify_top_picks(df, top_n)
 picks = revalidate_prices(picks)
 
 # قیمت native را همین‌جا (قبل از تبدیل ارز) ثبت می‌کنیم:
-log_daily_picks(picks, scanner_name="market_scanner", history_path="data/picks_history.jsonl")
+log_daily_picks(picks, scanner_name="market_scanner", scoring_version=SCORING_VERSION,
+                 history_path="data/picks_history.jsonl")
 
 # بعد از این خط، تبدیل ارز نمایشی مثل قبل ادامه پیدا می‌کند (picks تغییر
 # می‌کند ولی رکورد ثبت‌شده دست‌نخورده می‌ماند، چون قبل از تغییر کپی گرفته شد)
