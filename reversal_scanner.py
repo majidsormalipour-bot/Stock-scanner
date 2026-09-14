@@ -77,6 +77,11 @@ try:
 except ImportError:
     analyze_concentration = build_concentration_note = None
 
+try:
+    from rank_bands import compute_rank_labels
+except ImportError:
+    compute_rank_labels = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -87,6 +92,15 @@ WEIGHT_VALUE = 0.35          # ارزندگی نسبت به هم‌صنعتی‌
 WEIGHT_SUPPORT = 0.25        # نزدیکی به سطح حمایت (کف ۵۲ هفته / میانگین ۲۰۰ روزه)
 WEIGHT_STABILIZING = 0.20    # نشانه توقف افت (اشباع فروش + تثبیت اخیر)
 WEIGHT_SAFETY = 0.20         # فیلتر ایمنی بنیادی - رد تله ارزشی/شرکت در حال فروپاشی
+
+try:
+    from scoring_version import compute_version
+    SCORING_VERSION = compute_version({
+        "value": WEIGHT_VALUE, "support": WEIGHT_SUPPORT,
+        "stabilizing": WEIGHT_STABILIZING, "safety": WEIGHT_SAFETY,
+    })
+except ImportError:
+    SCORING_VERSION = "unknown"
 
 HISTORY_PERIOD = "1y"
 MAX_WORKERS = int(os.environ.get("SCANNER_MAX_WORKERS", "8"))
@@ -169,11 +183,23 @@ UNIVERSE_LOADERS = {
 # ----------------------------------------------------------------------
 
 def compute_rsi(series: pd.Series, period: int = 14) -> float:
+    """
+    اصلاح رگرسیونی: مشابه همان اصلاح در short_term_scanner.py - نسخه
+    قبلی با میانگین ضرر صفر (روند صعودی خالص) NaN می‌داد نه ۱۰۰.
+    """
     delta = series.diff()
     gain, loss = delta.clip(lower=0), -delta.clip(upper=0)
-    rs = gain.rolling(period).mean() / loss.rolling(period).mean().replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1]) if not rsi.empty else np.nan
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    if avg_gain.empty or avg_loss.empty:
+        return np.nan
+    last_gain, last_loss = avg_gain.iloc[-1], avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return np.nan
+    if last_loss == 0:
+        return 100.0 if last_gain > 0 else 50.0
+    rs = last_gain / last_loss
+    return 100 - (100 / (1 + rs))
 
 
 def fetch_one(ticker: str) -> dict:
@@ -562,7 +588,8 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     if log_daily_picks is not None:
         try:
             log_daily_picks(picks, scanner_name="reversal_scanner",
-                             history_path="data/picks_history.jsonl")
+                             history_path="data/picks_history.jsonl",
+                             scoring_version=SCORING_VERSION)
         except Exception as e:
             print(f"  (picks tracking skipped: {e})")
 
@@ -609,8 +636,12 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
     else:
         currency_note = "💵 همه قیمت‌ها به دلار آمریکا (USD) هستند."
 
+    rank_labels = None
+    if compute_rank_labels is not None and "total_score" in df.columns:
+        rank_labels = compute_rank_labels(df["total_score"].tolist())
+
     rows_html = []
-    for ticker, row in df.iterrows():
+    for i, (ticker, row) in enumerate(df.iterrows()):
         price = row.get("current_price")
         price_str = f"{symbol}{price:.2f}" if pd.notna(price) else "—"
         stale_flag = ""
@@ -618,6 +649,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
             stale_flag = ' <span class="warn-inline">⚠️ قیمت اولیه کهنه بود؛ اصلاح شد</span>'
         if row.get("financial_freshness") == "stale":
             stale_flag += ' <span class="warn-inline">⚠️ داده مالی قدیمی (TTM کهنه) - دلیل افت را بررسی کنید</span>'
+        rank_str = f"{rank_labels[i]} · " if rank_labels else ""
         rows_html.append(f"""
         <div class="card">
           <div class="card-header">
@@ -626,7 +658,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
             <span class="sector">{row.get('sector', 'نامشخص')} · {row.get('country', '')}</span>
           </div>
           <div class="metrics">
-            <span>امتیاز: <b>{row['total_score']:.2f}</b>/1.00</span>
+            <span>{rank_str}امتیاز: <b>{row['total_score']:.2f}</b>/1.00</span>
             <span>قیمت: <b>{price_str}</b></span>
           </div>
           <div class="reason">چرا؟ {explain_pick(row)}{stale_flag}</div>
@@ -663,6 +695,9 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
     نظر ارزندگی جذاب‌اند. ⚠️ افت قیمت همیشه فرصت نیست - گاهی دلیل واقعی و
     جدی دارد ("تله ارزشی"). قبل از خرید، حتماً دلیل افت را بررسی کنید. این
     گزارش توصیه مالی نیست.
+    <br><br>
+    ℹ️ سهامی که رتبه‌شان به‌صورت بازه نشان داده شده (مثلاً «رتبه ۲–۴»)
+    اختلاف امتیاز ناچیزی دارند و عملاً هم‌سطح‌اند.
   </div>
   {concentration_note}
   {''.join(rows_html)}

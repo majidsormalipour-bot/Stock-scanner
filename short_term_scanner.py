@@ -66,6 +66,11 @@ try:
 except ImportError:
     analyze_concentration = build_concentration_note = None
 
+try:
+    from rank_bands import compute_rank_labels
+except ImportError:
+    compute_rank_labels = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -79,6 +84,15 @@ WEIGHT_BREAKOUT = 0.25      # نزدیکی به سقف/شکست سطح مقاو�
 WEIGHT_TREND = 0.15         # هم‌جهتی با روند بلندمدت (فیلتر "چاقوی در حال سقوط")
 BENCHMARK_TICKER = "SPY"    # برای سنجش قدرت نسبی سهم به کل بازار
 MIN_DOLLAR_VOLUME = 5_000_000   # حداقل میانگین حجم معاملات روزانه (به دلار) برای نقدشوندگی کافی
+
+try:
+    from scoring_version import compute_version
+    SCORING_VERSION = compute_version({
+        "momentum": WEIGHT_MOMENTUM, "volume": WEIGHT_VOLUME,
+        "macd": WEIGHT_MACD, "breakout": WEIGHT_BREAKOUT, "trend": WEIGHT_TREND,
+    })
+except ImportError:
+    SCORING_VERSION = "unknown"
 
 HISTORY_PERIOD = "6mo"
 # روی سرورهای ابری (مثل GitHub Actions) یاهو فایننس درخواست‌های پرحجم و
@@ -177,11 +191,27 @@ UNIVERSE_LOADERS = {
 # ----------------------------------------------------------------------
 
 def compute_rsi(series: pd.Series, period: int = 14) -> float:
+    """
+    اصلاح رگرسیونی: نسخه قبلی وقتی میانگین ضرر دقیقاً صفر بود (روند
+    صعودی خالص بدون هیچ افت قیمتی)، به‌جای RSI=100 مقدار NaN برمی‌گرداند
+    - چون `.replace(0, np.nan)` صفر واقعی (نه گمشده) را با مقدار گمشده
+    یکی می‌گرفت. این تست‌های واحد (tests/test_short_term_scanner.py) این
+    را کشف کردند. NaN بعداً در rsi_score به «خنثی ۰.۵» تبدیل می‌شد که
+    برای یک روند فوق‌العاده قوی نادرست است (باید امتیاز اشباع خرید بگیرد).
+    """
     delta = series.diff()
     gain, loss = delta.clip(lower=0), -delta.clip(upper=0)
-    rs = gain.rolling(period).mean() / loss.rolling(period).mean().replace(0, np.nan)
-    rsi = 100 - (100 / (1 + rs))
-    return float(rsi.iloc[-1]) if not rsi.empty else np.nan
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    if avg_gain.empty or avg_loss.empty:
+        return np.nan
+    last_gain, last_loss = avg_gain.iloc[-1], avg_loss.iloc[-1]
+    if pd.isna(last_gain) or pd.isna(last_loss):
+        return np.nan
+    if last_loss == 0:
+        return 100.0 if last_gain > 0 else 50.0  # بدون ضرر: صعود خالص=۱۰۰، قیمت کاملاً ثابت=۵۰
+    rs = last_gain / last_loss
+    return 100 - (100 / (1 + rs))
 
 
 def compute_macd(close: pd.Series):
@@ -602,7 +632,8 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     if log_daily_picks is not None:
         try:
             log_daily_picks(picks, scanner_name="short_term_scanner",
-                             history_path="data/picks_history.jsonl")
+                             history_path="data/picks_history.jsonl",
+                             scoring_version=SCORING_VERSION)
         except Exception as e:
             print(f"  (picks tracking skipped: {e})")
 
@@ -647,8 +678,13 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rate: float = 1.0,
                        concentration_note: str = ""):
     symbol = "€" if currency == "EUR" else "$"
+
+    rank_labels = None
+    if compute_rank_labels is not None and "total_score" in df.columns:
+        rank_labels = compute_rank_labels(df["total_score"].tolist())
+
     rows_html = []
-    for ticker, row in df.iterrows():
+    for i, (ticker, row) in enumerate(df.iterrows()):
         price = row.get("current_price")
         price_str = f"{symbol}{price:.2f}" if pd.notna(price) else "—"
         stop = row.get("suggested_stop")
@@ -660,6 +696,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
         if row.get("price_was_stale"):
             stale_flag = '<span class="earnings-warning">⚠️ قیمت اولیه دریافتی کهنه بود؛ اصلاح شد</span>'
         price_date = row.get("price_date", "")
+        rank_str = f"{rank_labels[i]} · " if rank_labels else ""
 
         rows_html.append(f"""
         <div class="card">
@@ -669,7 +706,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
             <span class="sector">{row.get('sector', 'نامشخص')} · {row.get('country', '')}</span>
           </div>
           <div class="metrics">
-            <span>امتیاز: <b>{row['total_score']:.2f}</b>/1.00</span>
+            <span>{rank_str}امتیاز: <b>{row['total_score']:.2f}</b>/1.00</span>
             <span>قیمت: <b>{price_str}</b></span>
             <span class="stop">حد ضرر پیشنهادی: <b>{stop_str}</b></span>
           </div>
@@ -716,6 +753,9 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
     به‌سرعت باطل شوند و هیچ خبر/رویداد آینده را پیش‌بینی نمی‌کنند.
     «حد ضرر پیشنهادی» بر اساس نوسان‌پذیری اخیر هر سهم (ATR) محاسبه شده -
     رعایت آن برای مدیریت ریسک توصیه می‌شود. این گزارش توصیه مالی نیست.
+    <br><br>
+    ℹ️ سهامی که رتبه‌شان به‌صورت بازه نشان داده شده (مثلاً «رتبه ۲–۴»)
+    اختلاف امتیاز ناچیزی دارند و عملاً هم‌سطح‌اند.
   </div>
   {concentration_note}
   {''.join(rows_html)}

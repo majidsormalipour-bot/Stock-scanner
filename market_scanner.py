@@ -78,6 +78,11 @@ try:
 except ImportError:
     analyze_concentration = build_concentration_note = None
 
+try:
+    from rank_bands import compute_rank_labels
+except ImportError:
+    compute_rank_labels = None
+
 warnings.filterwarnings("ignore")
 
 # ----------------------------------------------------------------------
@@ -89,6 +94,15 @@ WEIGHT_GROWTH_VALUE = 0.35     # رشد و ارزندگی (P/E، EV/EBITDA، PEG
 WEIGHT_QUALITY = 0.30           # سلامت مالی نسبت به هم‌صنعتی‌ها (بدهی، سودآوری، جریان نقدی)
 WEIGHT_TECHNICAL = 0.20         # روند قیمت + مومنتوم ۱۲-۱ ماهه (فاکتور آکادمیک)
 WEIGHT_ANALYST = 0.15           # نظر تحلیل‌گران - وزن محدودتر چون این معیار سابقه سوگیری خوش‌بینانه دارد
+
+try:
+    from scoring_version import compute_version
+    SCORING_VERSION = compute_version({
+        "growth_value": WEIGHT_GROWTH_VALUE, "quality": WEIGHT_QUALITY,
+        "technical": WEIGHT_TECHNICAL, "analyst": WEIGHT_ANALYST,
+    })
+except ImportError:
+    SCORING_VERSION = "unknown"
 
 HISTORY_PERIOD = "1y"
 MAX_WORKERS = int(os.environ.get("SCANNER_MAX_WORKERS", "12"))
@@ -638,7 +652,8 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
     if log_daily_picks is not None:
         try:
             log_daily_picks(picks, scanner_name="market_scanner",
-                             history_path="data/picks_history.jsonl")
+                             history_path="data/picks_history.jsonl",
+                             scoring_version=SCORING_VERSION)
         except Exception as e:
             print(f"  (picks tracking skipped: {e})")
 
@@ -686,10 +701,19 @@ def run(universe: str, top_n: int, min_market_cap: float, custom_tickers: list[s
 def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rate: float = 1.0,
                        concentration_note: str = ""):
     """گزارش نهایی را به‌صورت یک صفحه HTML راست‌به‌چپ می‌سازد تا فارسی
-    درست نمایش داده شود (برخلاف ترمینال ویندوز که این مشکل را دارد)."""
+    درست نمایش داده شود (برخلاف ترمینال ویندوز که این مشکل را دارد).
+
+    به‌جای نمایش صرف امتیاز خام (که دقت کاذب القا می‌کند)، رتبه به‌صورت
+    باند نشان داده می‌شود: سهامی که امتیازشان کمتر از ۰.۰۳ واحد فاصله
+    دارد، عملاً هم‌سطح در نظر گرفته می‌شوند (rank_bands.py)."""
     symbol = "€" if currency == "EUR" else "$"
+
+    rank_labels = None
+    if compute_rank_labels is not None and "total_score" in df.columns:
+        rank_labels = compute_rank_labels(df["total_score"].tolist())
+
     rows_html = []
-    for ticker, row in df.iterrows():
+    for i, (ticker, row) in enumerate(df.iterrows()):
         price = row.get("current_price")
         price_str = f"{symbol}{price:.2f}" if pd.notna(price) else "—"
         stale_flag = ""
@@ -698,6 +722,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
         if row.get("financial_freshness") == "stale":
             stale_flag += ' <span style="color:#ffb74d;font-weight:bold;">⚠️ داده مالی قدیمی (TTM کهنه)</span>'
         price_date = row.get("price_date", "")
+        rank_str = f"{rank_labels[i]} · " if rank_labels else ""
         rows_html.append(f"""
         <div class="card">
           <div class="card-header">
@@ -706,7 +731,7 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
             <span class="sector">{row.get('sector', 'نامشخص')} · {row.get('country', '')}</span>
           </div>
           <div class="metrics">
-            <span>امتیاز کل: <b>{row['total_score']:.2f}</b>/1.00</span>
+            <span>{rank_str}امتیاز: <b>{row['total_score']:.2f}</b>/1.00</span>
             <span>قیمت فعلی: <b>{price_str}</b></span>
           </div>
           <div class="reason">چرا؟ {explain_pick(row)}{stale_flag}</div>
@@ -748,6 +773,10 @@ def write_html_report(df: pd.DataFrame, path: str, currency: str = "USD", fx_rat
     ⚠️ این رتبه‌بندی صرفاً بر پایه فرمول‌های عددی روی داده گذشته/فعلی است و
     قطعیتی درباره آینده ندارد. جایگزین تحقیق شخصی یا مشورت با مشاور مالی
     دارای مجوز نیست. لطفاً قبل از خرید واقعی بررسی بیشتری کنید.
+    <br><br>
+    ℹ️ سهامی که رتبه‌شان به‌صورت بازه نشان داده شده (مثلاً «رتبه ۲–۴»)
+    اختلاف امتیاز ناچیزی با هم دارند و عملاً هم‌سطح‌اند - ترتیب دقیق
+    بین آن‌ها را نباید معنادار دانست.
   </div>
   {concentration_note}
   {''.join(rows_html)}

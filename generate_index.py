@@ -14,6 +14,12 @@ try:
 except ImportError:
     fetch_market_regime_via_yfinance = regime_interpretation = None
 
+try:
+    from cross_signal import find_agreement, build_html_section as build_agreement_section, CSS_SNIPPET as AGREEMENT_CSS
+except ImportError:
+    find_agreement = build_agreement_section = None
+    AGREEMENT_CSS = ""
+
 now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
 
 performance_card_html = ""
@@ -56,6 +62,14 @@ if fetch_market_regime_via_yfinance is not None:
     except Exception:
         regime_banner_html = ""
 
+agreement_html = ""
+if find_agreement is not None:
+    try:
+        agreement_df = find_agreement(top_n=15)
+        agreement_html = build_agreement_section(agreement_df)
+    except Exception:
+        agreement_html = ""
+
 html = f"""<!DOCTYPE html>
 <html lang="fa" dir="rtl">
 <head>
@@ -78,12 +92,14 @@ html = f"""<!DOCTYPE html>
   .regime-metrics {{ font-size:13px; color:#bbb; margin-bottom:8px; }}
   .regime-notes {{ font-size:12px; color:#a8c8e0; margin:0 0 8px 0; padding-right:18px; }}
   .regime-disclaimer {{ font-size:11px; color:#777; }}
+  {AGREEMENT_CSS}
 </style>
 </head>
 <body>
   <h1>📊 داشبورد اسکن بازار سهام</h1>
   <p class="updated">آخرین اجرا: {now}</p>
   {regime_banner_html}
+  {agreement_html}
 
   <a class="card" href="market_scan_report.html">
     <span class="emoji">🏆</span>
