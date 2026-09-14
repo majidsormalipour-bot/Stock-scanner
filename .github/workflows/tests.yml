@@ -1,0 +1,31 @@
+name: Tests
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # این تست‌ها فقط منطق امتیازدهی/فیلتر را با داده ساختگی چک می‌کنند -
+      # هیچ تماس شبکه واقعی (yfinance/Twelve Data) ندارند، پس سریع و بدون
+      # نیاز به هیچ Secret اجرا می‌شوند. هدف: جلوگیری از تکرار باگ‌هایی که
+      # در README پروژه مستند شده‌اند (مثلاً معافیت بدهی بانک‌ها، یا
+      # آستانه min_data_fields غیرممکن بعد از حذف یک معیار).
+      - name: Run regression tests
+        run: pytest tests/ -v
