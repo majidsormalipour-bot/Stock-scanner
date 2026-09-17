@@ -89,3 +89,5 @@
 {"date": "2026-09-14", "scanner": "reversal_scanner", "ticker": "PNR", "score": 0.667396, "price": 56.58, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-09-14", "scanner": "reversal_scanner", "ticker": "PPG", "score": 0.656583, "price": 105.5, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-09-15", "scanner": "short_term_scanner", "ticker": "KHC", "score": 0.480833, "price": 24.6, "currency": "USD", "scoring_version": "079a15be"}
+{"date": "2026-09-17", "scanner": "short_term_scanner", "ticker": "HUBB", "score": 0.425833, "price": 439.07, "currency": "USD", "scoring_version": "079a15be"}
+{"date": "2026-09-17", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.361, "price": 439.07, "currency": "USD", "scoring_version": "b3b30949"}
