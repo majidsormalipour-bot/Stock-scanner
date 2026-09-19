@@ -93,3 +93,6 @@
 {"date": "2026-09-17", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.361, "price": 439.07, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-09-18", "scanner": "short_term_scanner", "ticker": "HUBB", "score": 0.500833, "price": 443.23, "currency": "USD", "scoring_version": "079a15be"}
 {"date": "2026-09-18", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.361, "price": 443.23, "currency": "USD", "scoring_version": "b3b30949"}
+{"date": "2026-09-19", "scanner": "short_term_scanner", "ticker": "HUBB", "score": 0.525833, "price": 446.92, "currency": "USD", "scoring_version": "079a15be"}
+{"date": "2026-09-19", "scanner": "short_term_scanner", "ticker": "ITX.MC", "score": 0.438333, "price": 51.74, "currency": "EUR", "scoring_version": "079a15be"}
+{"date": "2026-09-19", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.387667, "price": 446.92, "currency": "USD", "scoring_version": "b3b30949"}
