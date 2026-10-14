@@ -497,3 +497,5 @@
 {"date": "2026-10-13", "scanner": "reversal_scanner", "ticker": "ADBE", "score": 0.694362, "price": 238.14, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-10-13", "scanner": "reversal_scanner", "ticker": "BAC", "score": 0.686259, "price": 54.58, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-10-13", "scanner": "reversal_scanner", "ticker": "FIS", "score": 0.685713, "price": 34.26, "currency": "USD", "scoring_version": "b3b30949"}
+{"date": "2026-10-14", "scanner": "short_term_scanner", "ticker": "SAN.MC", "score": 0.450833, "price": 12.178, "currency": "EUR", "scoring_version": "079a15be"}
+{"date": "2026-10-14", "scanner": "short_term_scanner", "ticker": "BBVA.MC", "score": 0.363333, "price": 23.22, "currency": "EUR", "scoring_version": "079a15be"}
