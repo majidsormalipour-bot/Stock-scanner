@@ -547,3 +547,5 @@
 {"date": "2026-10-16", "scanner": "reversal_scanner", "ticker": "UHS", "score": 0.631615, "price": 187.36, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-10-16", "scanner": "reversal_scanner", "ticker": "STE", "score": 0.627034, "price": 224.33, "currency": "USD", "scoring_version": "b3b30949"}
 {"date": "2026-10-16", "scanner": "reversal_scanner", "ticker": "SBAC", "score": 0.627026, "price": 183.72, "currency": "USD", "scoring_version": "b3b30949"}
+{"date": "2026-10-17", "scanner": "short_term_scanner", "ticker": "ITX.MC", "score": 0.833333, "price": 55.86, "currency": "EUR", "scoring_version": "079a15be"}
+{"date": "2026-10-17", "scanner": "short_term_scanner", "ticker": "IBE.MC", "score": 0.729167, "price": 21.69, "currency": "EUR", "scoring_version": "079a15be"}
