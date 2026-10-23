@@ -551,3 +551,5 @@
 {"date": "2026-10-17", "scanner": "short_term_scanner", "ticker": "IBE.MC", "score": 0.729167, "price": 21.69, "currency": "EUR", "scoring_version": "079a15be"}
 {"date": "2026-10-22", "scanner": "short_term_scanner", "ticker": "HUBB", "score": 0.450833, "price": 460.76, "currency": "USD", "scoring_version": "079a15be"}
 {"date": "2026-10-22", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.387667, "price": 460.76, "currency": "USD", "scoring_version": "b3b30949"}
+{"date": "2026-10-23", "scanner": "short_term_scanner", "ticker": "HUBB", "score": 0.500833, "price": 445.8, "currency": "USD", "scoring_version": "079a15be"}
+{"date": "2026-10-23", "scanner": "reversal_scanner", "ticker": "HUBB", "score": 0.374333, "price": 445.8, "currency": "USD", "scoring_version": "b3b30949"}
