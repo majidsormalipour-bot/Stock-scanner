@@ -48,6 +48,25 @@ MATURITY_BUCKETS = [7, 28, 84]  # روز - تقریبا ۱ هفته، ۴ هفت�
 BENCHMARK_US = "^GSPC"
 BENCHMARK_EU = "^STOXX50E"
 
+# بنچمارک دوم و «منصفانه‌تر» برای سهام دلاری: شاخص S&P 500 هم‌وزن (نه
+# وزن‌دهی بر اساس ارزش بازار). دلیل افزودنش: در دوره‌هایی که بازار
+# "رهبری باریک" دارد (مثلاً فقط چند غول فناوری شاخص اصلی را بالا نگه
+# می‌دارند؛ این دقیقا الگوی سپتامبر-اکتبر ۲۰۲۶ بود - شاخص S&P 500 اصلی
+# تقریبا صاف ولی شاخص هم‌وزن آن ماه نزدیک ۵٪ افت کرد)، مقایسه با شاخص
+# اصلی برای استراتژی‌هایی که عمدتا سهام غیر-مگاکپ انتخاب می‌کنند (دقیقا
+# وضعیت این سه اسکنر) ناعادلانه است. RSP (صندوق ETF هم‌وزن S&P 500)
+# یک پروکسی رایج و قابل‌دسترس برای «میانگین سهم» است.
+BENCHMARK_US_EQUAL_WEIGHT = "RSP"
+
+# آستانه‌های تشخیص رنگ سبز/قرمز/نارنجی - عمدا سخت‌گیرتر شده: قبلا فقط
+# همبستگی مثبت کافی بود تا سبز شود، که باعث می‌شد یک ردیف با نرخ موفقیت
+# ۲۰٪ و بازده/آلفای منفی هم سبز (یعنی "خوب") نشان داده شود - چون همبستگی
+# فقط رتبه نسبی را می‌سنجد، نه کیفیت مطلق. حالا سبز فقط وقتی است که هم
+# همبستگی مثبت باشد و هم اکثریت پیشنهادها واقعا سودده بوده باشند.
+GREEN_CORR_THRESHOLD = 0.15
+GREEN_HIT_RATE_THRESHOLD = 0.50
+RED_CORR_THRESHOLD = -0.05
+
 BATCH_DELAY = float(os.environ.get("SCANNER_BATCH_DELAY", "1.0"))
 
 
@@ -113,22 +132,32 @@ def build_performance_table(history: pd.DataFrame) -> pd.DataFrame:
     logger.info("گرفتن شاخص‌های مرجع از %s تا امروز...", earliest)
     bench_us = fetch_benchmark_series(BENCHMARK_US, earliest)
     bench_eu = fetch_benchmark_series(BENCHMARK_EU, earliest)
+    bench_us_eq = fetch_benchmark_series(BENCHMARK_US_EQUAL_WEIGHT, earliest)
 
     benchmark_returns = []
+    benchmark_eq_returns = []
     for _, row in history.iterrows():
         series = bench_eu if row["currency"] == "EUR" else bench_us
         if series is None:
             benchmark_returns.append(np.nan)
-            continue
-        p0 = _nearest_price(series, row["date"])
-        p1 = series.iloc[-1]
-        if p0 and p0 > 0:
-            benchmark_returns.append((p1 / p0) - 1)
         else:
-            benchmark_returns.append(np.nan)
+            p0 = _nearest_price(series, row["date"])
+            p1 = series.iloc[-1]
+            benchmark_returns.append((p1 / p0) - 1 if p0 and p0 > 0 else np.nan)
+
+        # بنچمارک هم‌وزن فقط برای سهام دلاری معنا دارد؛ برای سهام اروپایی
+        # معادل استانداردی در دسترس نیست، پس NaN می‌ماند (نه یک تقریب نادرست).
+        if row["currency"] == "EUR" or bench_us_eq is None:
+            benchmark_eq_returns.append(np.nan)
+        else:
+            p0_eq = _nearest_price(bench_us_eq, row["date"])
+            p1_eq = bench_us_eq.iloc[-1]
+            benchmark_eq_returns.append((p1_eq / p0_eq) - 1 if p0_eq and p0_eq > 0 else np.nan)
 
     history["benchmark_return"] = benchmark_returns
     history["alpha"] = history["stock_return"] - history["benchmark_return"]
+    history["benchmark_return_eq"] = benchmark_eq_returns
+    history["alpha_eq"] = history["stock_return"] - history["benchmark_return_eq"]
     return history
 
 
@@ -148,21 +177,34 @@ def summarize(history: pd.DataFrame) -> pd.DataFrame:
             if len(matured) < 5:
                 rows.append({
                     "scanner": scanner, "horizon_days": horizon, "n": len(matured),
+                    "n_unique_days": matured["date"].dt.date.nunique() if len(matured) else 0,
                     "hit_rate": np.nan, "avg_return": np.nan, "avg_alpha": np.nan,
-                    "score_return_corr": np.nan, "note": "داده کافی نیست (حداقل ۵ نمونه لازم است)",
+                    "avg_alpha_eq": np.nan, "score_return_corr": np.nan,
+                    "note": "داده کافی نیست (حداقل ۵ نمونه لازم است)",
                 })
                 continue
+
+            # تعداد روزهای تقویمی منحصربه‌فرد که این پیشنهادها در آن‌ها ثبت
+            # شده‌اند - این عدد را کنار n نگه دارید: اگر n بزرگ باشد ولی
+            # n_unique_days کوچک، یعنی این «نمونه‌ها» عمدتا همان چند سهم
+            # تکراری با تاریخ‌های پیشنهاد نزدیک به هم‌اند، نه رویدادهای
+            # واقعا مستقل - اعتماد آماری باید بر اساس n_unique_days سنجیده
+            # شود، نه n خام.
+            n_unique_days = matured["date"].dt.date.nunique()
 
             hit_rate = (matured["stock_return"] > 0).mean()
             avg_return = matured["stock_return"].mean()
             avg_alpha = matured["alpha"].mean()
+            avg_alpha_eq = matured["alpha_eq"].mean() if "alpha_eq" in matured.columns else np.nan
             corr = matured["score"].corr(matured["stock_return"])
 
             rows.append({
                 "scanner": scanner, "horizon_days": horizon, "n": len(matured),
+                "n_unique_days": int(n_unique_days),
                 "hit_rate": round(float(hit_rate), 4),
                 "avg_return": round(float(avg_return), 4),
                 "avg_alpha": round(float(avg_alpha), 4) if pd.notna(avg_alpha) else np.nan,
+                "avg_alpha_eq": round(float(avg_alpha_eq), 4) if pd.notna(avg_alpha_eq) else np.nan,
                 "score_return_corr": round(float(corr), 4) if pd.notna(corr) else np.nan,
                 "note": "",
             })
@@ -208,21 +250,41 @@ def write_html_report(summary: pd.DataFrame, quartile: pd.DataFrame, history: pd
     for _, r in summary.iterrows():
         name = scanner_fa.get(r["scanner"], r["scanner"])
         if r["note"]:
+            n_days = r.get("n_unique_days", 0)
             rows_html.append(
                 f"<tr><td>{name}</td><td>{r['horizon_days']} روز</td>"
-                f"<td colspan='4' style='color:#888'>{r['note']} (n={r['n']})</td></tr>"
+                f"<td colspan='5' style='color:#888'>{r['note']} (n={r['n']}, "
+                f"{n_days} روز منحصربه‌فرد)</td></tr>"
             )
             continue
         corr = r["score_return_corr"]
-        corr_color = "#4caf50" if pd.notna(corr) and corr > 0.15 else (
-            "#ef5350" if pd.notna(corr) and corr < -0.05 else "#ffb74d"
-        )
+        hit_rate = r["hit_rate"]
+        # سبز فقط وقتی که هم رتبه‌بندی نسبی درست باشد (همبستگی مثبت
+        # معنادار) و هم اکثریت پیشنهادها واقعا سودده بوده باشند - یک
+        # همبستگی مثبت به‌تنهایی کافی نیست (می‌تواند «کمتر بد» را به
+        # اشتباه «خوب» نشان دهد).
+        if pd.notna(corr) and pd.notna(hit_rate) and corr > GREEN_CORR_THRESHOLD and hit_rate >= GREEN_HIT_RATE_THRESHOLD:
+            corr_color = "#4caf50"
+        elif pd.notna(corr) and corr < RED_CORR_THRESHOLD:
+            corr_color = "#ef5350"
+        else:
+            corr_color = "#ffb74d"
+
+        n_days = r.get("n_unique_days", r["n"])
+        n_days_warn = ""
+        if r["n"] and n_days and r["n"] >= 3 * n_days:
+            # اگر n خام حداقل ۳ برابر تعداد روزهای منحصربه‌فرد باشد، یعنی
+            # همپوشانی زیادی بین نمونه‌ها هست - این را با یک علامت کوچک نشان می‌دهیم
+            n_days_warn = ' <span style="color:#ffb74d">⚠︎</span>'
+
         rows_html.append(f"""
         <tr>
-          <td>{name}</td><td>{r['horizon_days']} روز (n={r['n']})</td>
-          <td>{r['hit_rate']:.0%}</td>
+          <td>{name}</td>
+          <td>{r['horizon_days']} روز (n={r['n']}, {n_days} روز{n_days_warn})</td>
+          <td>{hit_rate:.0%}</td>
           <td>{fmt_pct(r['avg_return'])}</td>
           <td>{fmt_pct(r['avg_alpha'])}</td>
+          <td>{fmt_pct(r.get('avg_alpha_eq'))}</td>
           <td style="color:{corr_color};font-weight:bold">{corr:.2f}</td>
         </tr>""")
 
@@ -260,8 +322,8 @@ def write_html_report(summary: pd.DataFrame, quartile: pd.DataFrame, history: pd
 
   <h2>آیا امتیاز بالاتر واقعاً بازده بهتری می‌دهد؟</h2>
   <table>
-    <tr><th>اسکنر</th><th>بازه</th><th>نرخ موفقیت</th><th>میانگین بازده</th>
-        <th>میانگین آلفا (نسبت به شاخص)</th><th>همبستگی امتیاز-بازده</th></tr>
+    <tr><th>اسکنر</th><th>بازه (n, روزهای منحصربه‌فرد)</th><th>نرخ موفقیت</th><th>میانگین بازده</th>
+        <th>آلفا / S&P 500</th><th>آلفا / S&P 500 هم‌وزن</th><th>همبستگی امتیاز-بازده</th></tr>
     {"".join(rows_html)}
   </table>
 
@@ -273,13 +335,24 @@ def write_html_report(summary: pd.DataFrame, quartile: pd.DataFrame, history: pd
 
   <div class="note">
     <b>راهنمای خواندن این جدول:</b><br>
-    • <b>همبستگی امتیاز-بازده</b> مهم‌ترین عدد است: هرچه به ۱ نزدیک‌تر باشد یعنی
-    امتیاز بالاتر واقعاً با بازده بهتر همراه بوده. نزدیک صفر یا منفی
-    (<span class="warn">نارنجی/قرمز</span>) یعنی فرمول در این بازه زمانی
-    قدرت پیش‌بینی نداشته - این لزوماً به‌معنای خراب بودن فرمول نیست، ممکن
-    است به تعداد نمونه کم یا شرایط خاص بازار مربوط باشد.<br>
-    • <b>آلفا</b> یعنی بازده اضافه نسبت به شاخص مرجع (S&P 500 یا یورواستوکس ۵۰).
-    آلفای مثبت یعنی این اسکنر بهتر از صرفاً نگه‌داشتن شاخص عمل کرده.<br>
+    • <b>سبز/نارنجی/قرمز</b> در ستون همبستگی: سبز فقط وقتی است که هم
+    همبستگی معنادار مثبت باشد (بالای {GREEN_CORR_THRESHOLD:.2f}) <b>و هم</b>
+    نرخ موفقیت حداقل {GREEN_HIT_RATE_THRESHOLD:.0%} باشد - چون همبستگی
+    به‌تنهایی فقط رتبه‌بندی نسبی را می‌سنجد و می‌تواند «کمتر بد» را به
+    اشتباه «خوب» نشان دهد. نارنجی یعنی نتیجه مبهم یا ناکافی، قرمز یعنی
+    رابطه معکوس (امتیاز بالاتر، بازده بدتر).<br>
+    • <b>«روزهای منحصربه‌فرد»</b> کنار n نشان می‌دهد این نمونه‌ها واقعا
+    چند رویداد مستقل‌اند، نه فقط چند بار دیدن همان چند سهم تکراری با
+    تاریخ‌های نزدیک به هم. علامت ⚠︎ یعنی n خام حداقل ۳ برابر روزهای
+    منحصربه‌فرد است - یعنی به اعتماد آماری این ردیف با احتیاط بیشتری
+    نگاه کنید.<br>
+    • <b>دو ستون آلفا</b>: یکی نسبت به شاخص اصلی (وزن‌دهی بر اساس ارزش
+    بازار) و یکی نسبت به نسخه هم‌وزن آن (RSP برای سهام دلاری). در
+    دوره‌هایی که فقط چند سهم بزرگ شاخص اصلی را بالا نگه می‌دارند («رهبری
+    باریک»)، آلفای نسبت به شاخص اصلی می‌تواند برای استراتژی‌هایی که سهام
+    غیر-مگاکپ انتخاب می‌کنند ناعادلانه منفی به نظر برسد؛ مقایسه با نسخه
+    هم‌وزن تصویر منصفانه‌تری از عملکرد نسبت به «میانگین سهم» بازار می‌دهد.
+    این ستون فقط برای سهام دلاری محاسبه می‌شود.<br>
     • بازده‌ها «بازده تا امروز» هستند، نه بازده دقیق در همان روز بازه
     (مثلاً یک پیشنهاد ۴۰ روزه در بازه «۲۸+ روز» با بازده ۴۰ روزه‌اش حساب
     می‌شود). این گزارش صرفاً تحلیلی است، نه توصیه مالی.
