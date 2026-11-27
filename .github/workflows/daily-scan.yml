@@ -6,18 +6,15 @@ on:
     - cron: "0 22 * * 1-5"
   workflow_dispatch: {}   # امکان اجرای دستی از تب Actions در گیت‌هاب
 
-permissions:
-  contents: write
-  pages: write
-  id-token: write
-
 concurrency:
   group: "pages"
   cancel-in-progress: false
 
 jobs:
-  scan-and-publish:
+  scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write   # برای commit فایل‌های تاریخچه
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
@@ -77,12 +74,25 @@ jobs:
           # داشبورد باقی بماند.
           cp performance_scorecard.html site/ 2>/dev/null || true
           python generate_index.py
+          ls -la site
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v5
         with:
           path: site
 
+  # انتشار در job جدا: اگر فقط این مرحله خطا بدهد، با «Re-run failed jobs»
+  # فقط همین job دوباره اجرا می‌شود (حدود ۱ دقیقه) و اسکن ۳۰ دقیقه‌ای تکرار نمی‌شود.
+  deploy:
+    needs: scan
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5
